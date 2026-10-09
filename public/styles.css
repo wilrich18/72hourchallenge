@@ -177,6 +177,7 @@ section.band.alt { background: var(--surface-2); }
 @media (max-width: 520px) { .who .name { display: none; } }
 
 .demo-banner { background: var(--warn-soft); color: var(--text); font-size: 0.9rem; padding: 0.5rem 0; }
+.linklike { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
 .offline-banner { background: var(--warn); color: #fff; font-weight: 700; padding: 0.5rem 0; text-align: center; }
 
 main.app { padding: 1.5rem 0 4rem; }

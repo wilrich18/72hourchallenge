@@ -1,4 +1,4 @@
-/* Care Loop demo app.
+/* Care Loop web app (early version).
  * Everything is stored in this browser (localStorage, plus IndexedDB for uploaded files).
  * Roles and permissions follow the PRD's proposed permissions table, but they are only
  * enforced in the browser here; the real release must enforce them on the server (P2).
@@ -7,6 +7,10 @@
   "use strict";
 
   const STORE_KEY = "careloop-demo-v1";
+  const TRIAL_KEY = "careloop-trial-v1";
+  const TRIAL_DAYS = 7;
+  const RECHECK_MS = 3 * 86400000;
+  const CHECKOUT_URL = "https://whop.com/checkout/ch_hxaIOuGRbiYUxHr/";
   const INVITE_DAYS = 7;
   const MAX_UPLOAD = 20 * 1024 * 1024;
   const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -26,6 +30,7 @@
   };
 
   const view = document.getElementById("view");
+  const trialBanner = document.getElementById("trial-banner");
   const who = document.getElementById("who");
   const ui = { profileId: null, tab: "schedule" };
   let db = load();
@@ -113,9 +118,87 @@
     };
   })();
 
+  // ---------- free trial and subscription ----------
+  // The trial starts the first time this browser opens the app. After TRIAL_DAYS the app
+  // is locked until the visitor confirms, by email, an active Whop subscription.
+  function loadTrial() {
+    let t = null;
+    try { t = JSON.parse(localStorage.getItem(TRIAL_KEY)); } catch { /* start fresh */ }
+    if (!t || !t.startedAt) { t = { startedAt: Date.now() }; saveTrial(t); }
+    return t;
+  }
+  function saveTrial(t) {
+    try { localStorage.setItem(TRIAL_KEY, JSON.stringify(t)); } catch { /* ignore */ }
+  }
+  let trial = loadTrial();
+  const trialDaysLeft = () => Math.max(0, Math.ceil((trial.startedAt + TRIAL_DAYS * 86400000 - Date.now()) / 86400000));
+  const isSubscribed = () => !!trial.paidEmail;
+  const justSubscribed = new URLSearchParams(location.search).has("subscribed");
+
+  async function verifySubscription(email) {
+    const r = await fetch("/api/verify-subscription", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || "Something went wrong.");
+    return !!data.active;
+  }
+
+  // Re-check a saved subscription every few days so a cancelled one locks again.
+  // A network failure keeps access; only a clear "not active" from Whop removes it.
+  async function recheckSubscription() {
+    if (!isSubscribed() || Date.now() - (trial.verifiedAt || 0) < RECHECK_MS) return;
+    try {
+      const active = await verifySubscription(trial.paidEmail);
+      trial = active ? { ...trial, verifiedAt: Date.now() } : { startedAt: trial.startedAt };
+      saveTrial(trial);
+      if (!active) render();
+    } catch { /* try again next time */ }
+  }
+
+  function renderTrialBanner() {
+    if (isSubscribed()) {
+      trialBanner.innerHTML = "<strong>You're subscribed to Care Loop.</strong> Thank you!";
+    } else {
+      const left = trialDaysLeft();
+      trialBanner.innerHTML = left > 0
+        ? `<strong>Free trial: ${left} day${left === 1 ? "" : "s"} left.</strong> <a href="${CHECKOUT_URL}">Subscribe for $20/month</a> to keep using Care Loop after that. <button class="linklike" data-action="show-unlock">Already subscribed?</button>`
+        : "<strong>Your free trial has ended.</strong>";
+    }
+  }
+
+  function renderPaywall() {
+    const ended = trialDaysLeft() === 0;
+    view.innerHTML = `
+      <div class="signin">
+        <h1>${justSubscribed ? "Thanks for subscribing!" : ended ? "Your free trial has ended" : "Already subscribed?"}</h1>
+        ${justSubscribed
+          ? "<p>Enter the email address you used at checkout to unlock Care Loop on this browser.</p>"
+          : ended
+            ? `<p>Subscribe for <strong>$20/month</strong> to keep using Care Loop. Everything you entered is still saved in this browser.</p>
+               <p><a class="btn" href="${CHECKOUT_URL}">Subscribe for $20/month</a></p>
+               <p class="hint">Billed monthly through Whop. Cancel anytime.</p>
+               <h2 style="font-size:1.2rem;margin-top:1.5rem">Already subscribed?</h2>`
+            : "<p>Enter the email address you used at checkout to unlock Care Loop on this browser.</p>"}
+        <form class="card" data-form="unlock" novalidate>
+          <div class="field"><label for="ul-email">Email used at checkout</label><input id="ul-email" name="email" type="email" autocomplete="email" required></div>
+          <p class="error-text" data-error hidden></p>
+          <button class="btn" type="submit">Unlock Care Loop</button>
+        </form>
+        ${ended ? "" : '<p style="margin-top:1rem"><button class="btn ghost" data-action="hide-unlock">← Back to Care Loop</button></p>'}
+      </div>`;
+  }
+
   // ---------- rendering ----------
   function render() {
     document.getElementById("offline").hidden = navigator.onLine;
+    renderTrialBanner();
+    if (!isSubscribed() && (trialDaysLeft() === 0 || ui.unlock)) {
+      who.innerHTML = "";
+      return renderPaywall();
+    }
     const u = me();
     who.innerHTML = u
       ? `<span class="name">${h(u.name)}</span><button class="btn small secondary" data-action="signout">Sign out</button>`
@@ -132,7 +215,7 @@
     view.innerHTML = `
       <div class="signin">
         <h1>Sign in</h1>
-        <p class="hint">This demo has no passwords. Enter any name and email to act as that person. The real release will have verified accounts, password reset and two-step sign-in.</p>
+        <p class="hint">No password needed in this early version. Enter your name and email to get started. Verified accounts, password reset and two-step sign-in are coming.</p>
         <form class="card" data-form="signin" novalidate>
           <div class="field"><label for="si-name">Your name</label><input id="si-name" name="name" autocomplete="name" required></div>
           <div class="field"><label for="si-email">Email</label><input id="si-email" name="email" type="email" autocomplete="email" required></div>
@@ -474,7 +557,7 @@
             <div class="field"><label for="iv-role">Role</label><select id="iv-role" name="role">
               <option value="assisting">Assisting caregiver</option><option value="physician">Physician</option><option value="family">Family caregiver</option></select></div>
             <div class="field"><label class="check"><input type="checkbox" name="authority" required> I have the authority to share this person's health information with them.</label></div>
-            <p class="hint">Invitations expire after ${INVITE_DAYS} days. In this demo, the person accepts by signing in here with that email.</p>
+            <p class="hint">Invitations expire after ${INVITE_DAYS} days. For now, the person accepts by signing in on this browser with that email.</p>
             <p class="error-text" data-error hidden></p>
             <button class="btn" type="submit">Send invite</button>
           </form>
@@ -597,6 +680,31 @@
   }
 
   const forms = {
+    async unlock(f) {
+      if (!requireFields(f, ["email"])) return;
+      const email = val(f, "email").toLowerCase();
+      if (!validEmail(email)) return formError(f, "Please enter a valid email address.");
+      if (!navigator.onLine) return formError(f, "You're offline. Connect to the internet and try again.");
+      const btn = f.querySelector("button[type=submit]");
+      btn.disabled = true;
+      btn.textContent = "Checking…";
+      try {
+        if (!(await verifySubscription(email))) {
+          return formError(f, "We couldn't find an active subscription for that email. Use the email from your Whop receipt, or subscribe first.");
+        }
+        trial = { ...trial, paidEmail: email, verifiedAt: Date.now() };
+        saveTrial(trial);
+        ui.unlock = false;
+        if (justSubscribed) history.replaceState(null, "", location.pathname);
+        toast("Subscription confirmed. Thank you!");
+        render();
+      } catch (err) {
+        formError(f, err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Unlock Care Loop";
+      }
+    },
     signin(f) {
       if (!requireFields(f, ["name", "email"])) return;
       if (!validEmail(val(f, "email"))) return formError(f, "Please enter a valid email address.");
@@ -694,6 +802,8 @@
   };
 
   const actions = {
+    "show-unlock"() { ui.unlock = true; render(); },
+    "hide-unlock"() { ui.unlock = false; render(); },
     signout() { db.session = null; persist(); ui.profileId = null; render(); },
     "quick-signin"(el) { const u = db.users[el.dataset.email]; signIn(u.name, u.email); render(); },
     "sample-signin"() {
@@ -817,5 +927,9 @@
   // Another tab changed the data: reload it so this tab never overwrites newer entries.
   window.addEventListener("storage", (e) => { if (e.key === STORE_KEY) { db = load(); render(); } });
 
+  if (justSubscribed && !isSubscribed()) ui.unlock = true;
   render();
+  recheckSubscription();
+  // Lock the app if the trial runs out while it is open.
+  setInterval(() => { if (!isSubscribed() && trialDaysLeft() === 0 && !document.querySelector('[data-form="unlock"]')) render(); }, 60000);
 })();

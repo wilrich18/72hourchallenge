@@ -3,7 +3,7 @@
 A marketing site and interactive demo for **Care Loop**, built from the Care Loop PRD. Care Loop gives a family caregiver one shared patient profile that assisting caregivers and physicians can open too.
 
 - `/` is the marketing page, with an early-access sign-up form.
-- `/app` is the demo app: sign in, profiles, Schedule, Medical History, Doctor's notes, Logs, and Care team & history.
+- `/app` is the app: sign in, profiles, Schedule, Medical History, Doctor's notes, Logs, and Care team & history. It has a 7-day free trial with no sign-up, then needs a $20/month Whop subscription.
 
 ## The demo app
 
@@ -17,6 +17,15 @@ The demo runs entirely in the browser. It has no backend, and **it is not for re
 - **Saving** always shows whether it worked. When the browser is offline, nothing is saved.
 
 To try the other roles, use "Explore a sample profile", then sign out and sign in as `maria@example.com` (assisting caregiver) or `dr.okafor@example.com` (physician).
+
+## Free trial and subscription
+
+- The 7-day trial starts the first time a browser opens `/app`. No sign-up or card is needed.
+- After 7 days the app locks and links to the Whop checkout ($20/month, plan `plan_dIPsSbDYnGhzG`). After paying, Whop sends people back to `/app?subscribed=1`.
+- To unlock, the visitor enters the email they used at checkout. `api/verify-subscription.js` asks Whop whether that email has an active membership on the plan. Access is re-checked every 3 days, so a cancelled subscription locks again.
+- **Required:** set `WHOP_API_KEY` in Vercel to a Whop company API key that can read members (including email) and memberships. Without it, nobody can unlock after their trial.
+- Optional: `WHOP_COMPANY_ID` and `WHOP_PLAN_ID` override the defaults.
+- Limits of this early version: the trial and unlock are stored in the browser, so clearing site data restarts the trial (and erases the data). Anyone who knows a subscriber's email could unlock. Real accounts (R1) or "Sign in with Whop" would close both gaps.
 
 ## Early-access sign-ups
 
