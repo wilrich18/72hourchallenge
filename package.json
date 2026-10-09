@@ -1,9 +1,11 @@
 {
   "name": "care-loop",
   "private": true,
-  "description": "Care Loop marketing site and demo app",
-  "scripts": {
-    "dev": "npx vercel dev"
+  "description": "Care Loop marketing site and web app",
+  "engines": {
+    "node": ">=18"
   },
-  "engines": { "node": ">=18" }
+  "dependencies": {
+    "@vercel/blob": "^2.8.1"
+  }
 }

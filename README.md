@@ -1,31 +1,44 @@
 # Care Loop
 
-A marketing site and interactive demo for **Care Loop**, built from the Care Loop PRD. Care Loop gives a family caregiver one shared patient profile that assisting caregivers and physicians can open too.
+A marketing site and web app for **Care Loop**, built from the Care Loop PRD. Care Loop gives a family caregiver one shared patient profile that assisting caregivers and physicians can open too.
 
 - `/` is the marketing page, with an early-access sign-up form.
-- `/app` is the app: sign in, profiles, Schedule, Medical History, Doctor's notes, Logs, and Care team & history. It has a 7-day free trial with no sign-up, then needs a $20/month Whop subscription.
+- `/app` is the app: sign in, profiles, Schedule, Medical History, Doctor's notes, Logs, and Care team & history. People sign up for a 7-day free trial (no card), then need a $20/month Whop subscription.
 
-## The demo app
+## The app
 
-The demo runs entirely in the browser. It has no backend, and **it is not for real patient information**.
+Accounts and access are handled on the server (see below), but profile data is still saved in the browser. **It is not ready for real patient information.**
 
-- **Sign-in** takes any name and email, with no password. Signing in as an email that was invited to a profile accepts the invitation. Invitations expire after 7 days.
+- **Invitations:** an account whose email was invited to a profile accepts the invitation on sign-in, on the same browser. Invitations expire after 7 days.
 - **Roles and permissions** follow the PRD's proposed permissions table: family caregiver (owner), assisting caregiver and physician. These are enforced only in the browser. The real release must enforce them on the server (P2).
 - **Each entry** stores its author and time from the signed-in person. The owner can see a history of changes, export the profile as JSON, and delete it along with its uploaded files.
 - **Log entries** with a future date or time are refused, and overdue follow-ups are flagged.
 - **Uploads** accept PDFs and images up to 20 MB. They are stored in IndexedDB in that browser only.
 - **Saving** always shows whether it worked. When the browser is offline, nothing is saved.
 
-To try the other roles, use "Explore a sample profile", then sign out and sign in as `maria@example.com` (assisting caregiver) or `dr.okafor@example.com` (physician).
+To look around, use "Load a sample profile" on the profiles page.
 
-## Free trial and subscription
+## Accounts, free trial and subscription
 
-- The 7-day trial starts the first time a browser opens `/app`. No sign-up or card is needed.
-- After 7 days the app locks and links to the Whop checkout ($20/month, plan `plan_dIPsSbDYnGhzG`). After paying, Whop sends people back to `/app?subscribed=1`.
-- To unlock, the visitor enters the email they used at checkout. `api/verify-subscription.js` asks Whop whether that email has an active membership on the plan. Access is re-checked every 3 days, so a cancelled subscription locks again.
-- **Required:** set `WHOP_API_KEY` in Vercel to a Whop company API key that can read members (including email) and memberships. Without it, nobody can unlock after their trial.
-- Optional: `WHOP_COMPANY_ID` and `WHOP_PLAN_ID` override the defaults.
-- Limits of this early version: the trial and unlock are stored in the browser, so clearing site data restarts the trial (and erases the data). Anyone who knows a subscriber's email could unlock. Real accounts (R1) or "Sign in with Whop" would close both gaps.
+- People create a Care Loop account (name, email, password of at least 10 characters) to use `/app`. No credit card is needed.
+- The 7-day free trial starts when the account is created. After it ends, the server stops granting access until the account has an active $20/month Whop subscription (plan `plan_dIPsSbDYnGhzG`).
+- "Continue to payment" calls `api/checkout.js`, which creates a Whop checkout tagged with the account's email, so the payment is matched to the account even if a different email is used at Whop. After paying, Whop sends people back to `/app?subscribed=1`.
+- Subscription status is checked with Whop once the trial is over, cached for 6 hours, and re-checked on demand ("Check my subscription again").
+
+API routes: `api/auth/signup.js`, `api/auth/login.js`, `api/auth/logout.js`, `api/auth/me.js`, `api/checkout.js`. Shared code is in `api/_lib.js`.
+
+Accounts are stored as private JSON files in the `careloop-accounts` Vercel Blob store, one per account, with passwords hashed using scrypt. Sessions are signed, HttpOnly cookies that last 14 days.
+
+Environment variables (Vercel → Settings → Environment Variables):
+
+| Name | Required | What it's for |
+|---|---|---|
+| `BLOB_READ_WRITE_TOKEN` | yes | Set automatically by the Blob store |
+| `SESSION_SECRET` | yes | Signs login cookies |
+| `WHOP_API_KEY` | yes, for payments | Whop company API key that can read members (including email) and memberships and create checkout configurations. Without it, nobody can get back in after their trial. |
+| `WHOP_COMPANY_ID`, `WHOP_PLAN_ID` | no | Override the default business and plan |
+
+Not built yet: password reset by email, email verification, two-step sign-in, and login rate limiting. Profile data is still saved in each browser, so it doesn't follow an account to another device.
 
 ## Early-access sign-ups
 
@@ -43,6 +56,5 @@ Or deploy from the command line with `npx vercel` (preview) and `npx vercel --pr
 
 ```sh
 npx vercel dev        # site + API function at http://localhost:3000
-# or, static pages only:
-npx serve public      # then open /app.html
+# needs `vercel link` and `vercel env pull` first, plus SESSION_SECRET in your shell
 ```

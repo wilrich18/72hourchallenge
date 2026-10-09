@@ -7,10 +7,7 @@
   "use strict";
 
   const STORE_KEY = "careloop-demo-v1";
-  const TRIAL_KEY = "careloop-trial-v1";
-  const TRIAL_DAYS = 7;
-  const RECHECK_MS = 3 * 86400000;
-  const CHECKOUT_URL = "https://whop.com/checkout/ch_hxaIOuGRbiYUxHr/";
+  const MIN_PASSWORD = 10;
   const INVITE_DAYS = 7;
   const MAX_UPLOAD = 20 * 1024 * 1024;
   const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -118,76 +115,85 @@
     };
   })();
 
-  // ---------- free trial and subscription ----------
-  // The trial starts the first time this browser opens the app. After TRIAL_DAYS the app
-  // is locked until the visitor confirms, by email, an active Whop subscription.
-  function loadTrial() {
-    let t = null;
-    try { t = JSON.parse(localStorage.getItem(TRIAL_KEY)); } catch { /* start fresh */ }
-    if (!t || !t.startedAt) { t = { startedAt: Date.now() }; saveTrial(t); }
-    return t;
-  }
-  function saveTrial(t) {
-    try { localStorage.setItem(TRIAL_KEY, JSON.stringify(t)); } catch { /* ignore */ }
-  }
-  let trial = loadTrial();
-  const trialDaysLeft = () => Math.max(0, Math.ceil((trial.startedAt + TRIAL_DAYS * 86400000 - Date.now()) / 86400000));
-  const isSubscribed = () => !!trial.paidEmail;
+  // ---------- account, free trial and subscription ----------
+  // Accounts live on the server (api/auth/*). The 7-day trial starts when the account is
+  // created; after that the server only grants access with an active Whop subscription.
+  let account = null;   // response from /api/auth/me, or null when signed out
+  let loading = true;
   const justSubscribed = new URLSearchParams(location.search).has("subscribed");
+  if (new URLSearchParams(location.search).has("login")) ui.authMode = "login";
 
-  async function verifySubscription(email) {
-    const r = await fetch("/api/verify-subscription", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
+  async function api(path, options = {}) {
+    const r = await fetch(path, {
+      credentials: "same-origin",
+      headers: options.body ? { "Content-Type": "application/json" } : {},
+      ...options,
+      body: options.body ? JSON.stringify(options.body) : undefined,
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || "Something went wrong.");
-    return !!data.active;
+    if (!r.ok) throw Object.assign(new Error(data.error || "Something went wrong. Please try again."), { status: r.status });
+    return data;
   }
 
-  // Re-check a saved subscription every few days so a cancelled one locks again.
-  // A network failure keeps access; only a clear "not active" from Whop removes it.
-  async function recheckSubscription() {
-    if (!isSubscribed() || Date.now() - (trial.verifiedAt || 0) < RECHECK_MS) return;
+  // Ask the server who is signed in and whether they can use the app.
+  async function loadAccount(refresh) {
     try {
-      const active = await verifySubscription(trial.paidEmail);
-      trial = active ? { ...trial, verifiedAt: Date.now() } : { startedAt: trial.startedAt };
-      saveTrial(trial);
-      if (!active) render();
-    } catch { /* try again next time */ }
+      account = await api("/api/auth/me" + (refresh ? "?refresh=1" : ""));
+      useAccount();
+    } catch (err) {
+      if (err.status === 401) account = null;
+      else if (!account) toast(err.message, true);
+    }
+    loading = false;
+    render();
+  }
+
+  // Make the signed-in account the person acting in the app.
+  function useAccount() {
+    if (account && db.session !== account.user.email) signIn(account.user.name, account.user.email);
   }
 
   function renderTrialBanner() {
-    if (isSubscribed()) {
-      trialBanner.innerHTML = "<strong>You're subscribed to Care Loop.</strong> Thank you!";
-    } else {
-      const left = trialDaysLeft();
-      trialBanner.innerHTML = left > 0
-        ? `<strong>Free trial: ${left} day${left === 1 ? "" : "s"} left.</strong> <a href="${CHECKOUT_URL}">Subscribe for $20/month</a> to keep using Care Loop after that. <button class="linklike" data-action="show-unlock">Already subscribed?</button>`
-        : "<strong>Your free trial has ended.</strong>";
-    }
+    if (!account) { trialBanner.innerHTML = "<strong>7-day free trial.</strong> No credit card needed."; return; }
+    if (account.subscribed) { trialBanner.innerHTML = "<strong>You're subscribed to Care Loop.</strong> Thank you!"; return; }
+    const left = account.trial.daysLeft;
+    trialBanner.innerHTML = account.trial.active
+      ? `<strong>Free trial: ${left} day${left === 1 ? "" : "s"} left.</strong> <button class="linklike" data-action="checkout">Subscribe for $20/month</button> to keep using Care Loop after that.`
+      : "<strong>Your free trial has ended.</strong>";
+  }
+
+  function renderAuth() {
+    const signup = ui.authMode !== "login";
+    view.innerHTML = `
+      <div class="signin">
+        <h1>${signup ? "Start your free trial" : "Log in"}</h1>
+        <p>${signup ? "Create your Care Loop account to start a 7-day free trial. <strong>No credit card needed.</strong>" : "Welcome back. Log in to your Care Loop account."}</p>
+        <form class="card" data-form="${signup ? "signup" : "login"}" novalidate>
+          ${signup ? '<div class="field"><label for="au-name">Your name</label><input id="au-name" name="name" autocomplete="name" required></div>' : ""}
+          <div class="field"><label for="au-email">Email</label><input id="au-email" name="email" type="email" autocomplete="email" required></div>
+          <div class="field"><label for="au-pw">Password ${signup ? `<span class="hint">(at least ${MIN_PASSWORD} characters)</span>` : ""}</label>
+            <input id="au-pw" name="password" type="password" autocomplete="${signup ? "new-password" : "current-password"}" minlength="${signup ? MIN_PASSWORD : 1}" required></div>
+          <p class="error-text" data-error hidden></p>
+          <button class="btn" type="submit">${signup ? "Create account and start trial" : "Log in"}</button>
+        </form>
+        <p style="margin-top:1rem">${signup
+          ? 'Already have an account? <button class="linklike" data-action="auth-mode" data-mode="login">Log in</button>'
+          : 'New to Care Loop? <button class="linklike" data-action="auth-mode" data-mode="signup">Start a free trial</button>'}</p>
+      </div>`;
   }
 
   function renderPaywall() {
-    const ended = trialDaysLeft() === 0;
     view.innerHTML = `
       <div class="signin">
-        <h1>${justSubscribed ? "Thanks for subscribing!" : ended ? "Your free trial has ended" : "Already subscribed?"}</h1>
+        <h1>${justSubscribed ? "Finishing your subscription" : "Your free trial has ended"}</h1>
         ${justSubscribed
-          ? "<p>Enter the email address you used at checkout to unlock Care Loop on this browser.</p>"
-          : ended
-            ? `<p>Subscribe for <strong>$20/month</strong> to keep using Care Loop. Everything you entered is still saved in this browser.</p>
-               <p><a class="btn" href="${CHECKOUT_URL}">Subscribe for $20/month</a></p>
-               <p class="hint">Billed monthly through Whop. Cancel anytime.</p>
-               <h2 style="font-size:1.2rem;margin-top:1.5rem">Already subscribed?</h2>`
-            : "<p>Enter the email address you used at checkout to unlock Care Loop on this browser.</p>"}
-        <form class="card" data-form="unlock" novalidate>
-          <div class="field"><label for="ul-email">Email used at checkout</label><input id="ul-email" name="email" type="email" autocomplete="email" required></div>
-          <p class="error-text" data-error hidden></p>
-          <button class="btn" type="submit">Unlock Care Loop</button>
-        </form>
-        ${ended ? "" : '<p style="margin-top:1rem"><button class="btn ghost" data-action="hide-unlock">← Back to Care Loop</button></p>'}
+          ? "<p>Thanks for subscribing! If Care Loop doesn't unlock in a moment, Whop may still be confirming your payment. Check again in a minute.</p>"
+          : `<p>Hi ${h(account.user.name)}. Subscribe for <strong>$20/month</strong> to keep using Care Loop. Everything you entered is still saved.</p>`}
+        <p><button class="btn" data-action="checkout">${justSubscribed ? "Go back to checkout" : "Continue to payment"}</button></p>
+        <p class="hint">Secure checkout by Whop. Billed monthly, cancel anytime.</p>
+        ${account.checkFailed ? '<p class="error-text">We couldn\'t reach Whop to check your subscription just now.</p>' : ""}
+        <p style="margin-top:1.5rem">Already paid? <button class="linklike" data-action="recheck">Check my subscription again</button></p>
+        <p class="hint">Signed in as ${h(account.user.email)}. Not you? <button class="linklike" data-action="signout">Log out</button></p>
       </div>`;
   }
 
@@ -195,41 +201,16 @@
   function render() {
     document.getElementById("offline").hidden = navigator.onLine;
     renderTrialBanner();
-    if (!isSubscribed() && (trialDaysLeft() === 0 || ui.unlock)) {
-      who.innerHTML = "";
-      return renderPaywall();
-    }
-    const u = me();
-    who.innerHTML = u
-      ? `<span class="name">${h(u.name)}</span><button class="btn small secondary" data-action="signout">Sign out</button>`
+    who.innerHTML = account
+      ? `<span class="name">${h(account.user.name)}</span><button class="btn small secondary" data-action="signout">Log out</button>`
       : "";
-    if (!u) return renderSignIn();
+    if (loading) { view.innerHTML = '<p class="hint" role="status">Loading…</p>'; return; }
+    if (!account) return renderAuth();
+    if (!account.access) return renderPaywall();
     const p = currentProfile();
     if (p && membership(p)) return renderProfile(p);
     ui.profileId = null;
     renderProfiles();
-  }
-
-  function renderSignIn() {
-    const known = Object.values(db.users);
-    view.innerHTML = `
-      <div class="signin">
-        <h1>Sign in</h1>
-        <p class="hint">No password needed in this early version. Enter your name and email to get started. Verified accounts, password reset and two-step sign-in are coming.</p>
-        <form class="card" data-form="signin" novalidate>
-          <div class="field"><label for="si-name">Your name</label><input id="si-name" name="name" autocomplete="name" required></div>
-          <div class="field"><label for="si-email">Email</label><input id="si-email" name="email" type="email" autocomplete="email" required></div>
-          <p class="error-text" data-error hidden></p>
-          <button class="btn" type="submit">Sign in</button>
-        </form>
-        ${known.length ? `
-          <h2 style="font-size:1.2rem;margin-top:1.5rem">Switch to someone who has signed in here</h2>
-          <ul class="list card">${known.map((u) => `
-            <li><div class="main"><div class="title">${h(u.name)}</div><div class="meta">${h(u.email)}</div></div>
-            <div class="actions"><button class="btn small secondary" data-action="quick-signin" data-email="${h(u.email)}">Sign in</button></div></li>`).join("")}
-          </ul>` : ""}
-        <p style="margin-top:1.5rem"><button class="btn ghost" data-action="sample-signin">Or explore a sample profile as a family caregiver →</button></p>
-      </div>`;
   }
 
   function renderProfiles() {
@@ -679,38 +660,35 @@
     persist();
   }
 
-  const forms = {
-    async unlock(f) {
-      if (!requireFields(f, ["email"])) return;
-      const email = val(f, "email").toLowerCase();
-      if (!validEmail(email)) return formError(f, "Please enter a valid email address.");
-      if (!navigator.onLine) return formError(f, "You're offline. Connect to the internet and try again.");
-      const btn = f.querySelector("button[type=submit]");
-      btn.disabled = true;
-      btn.textContent = "Checking…";
-      try {
-        if (!(await verifySubscription(email))) {
-          return formError(f, "We couldn't find an active subscription for that email. Use the email from your Whop receipt, or subscribe first.");
-        }
-        trial = { ...trial, paidEmail: email, verifiedAt: Date.now() };
-        saveTrial(trial);
-        ui.unlock = false;
-        if (justSubscribed) history.replaceState(null, "", location.pathname);
-        toast("Subscription confirmed. Thank you!");
-        render();
-      } catch (err) {
-        formError(f, err.message);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Unlock Care Loop";
-      }
-    },
-    signin(f) {
-      if (!requireFields(f, ["name", "email"])) return;
-      if (!validEmail(val(f, "email"))) return formError(f, "Please enter a valid email address.");
-      signIn(val(f, "name"), val(f, "email"));
+  async function authSubmit(f, path, payload, welcome) {
+    if (!navigator.onLine) return formError(f, "You're offline. Connect to the internet and try again.");
+    const btn = f.querySelector("button[type=submit]");
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Please wait…";
+    try {
+      account = await api(path, { method: "POST", body: payload });
+      useAccount();
       ui.profileId = null;
+      toast(welcome);
       render();
+    } catch (err) {
+      formError(f, err.message);
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+
+  const forms = {
+    async signup(f) {
+      if (!requireFields(f, ["name", "email", "password"])) return;
+      if (!validEmail(val(f, "email"))) return formError(f, "Please enter a valid email address.");
+      if (f.elements.password.value.length < MIN_PASSWORD) return formError(f, `Please choose a password of at least ${MIN_PASSWORD} characters.`);
+      await authSubmit(f, "/api/auth/signup", { name: val(f, "name"), email: val(f, "email"), password: f.elements.password.value }, "Account created. Your 7-day free trial has started.");
+    },
+    async login(f) {
+      if (!requireFields(f, ["email", "password"])) return;
+      await authSubmit(f, "/api/auth/login", { email: val(f, "email"), password: f.elements.password.value }, "Welcome back.");
     },
     "profile-create"(f) {
       if (!requireFields(f, ["name", "authority"])) return;
@@ -802,15 +780,23 @@
   };
 
   const actions = {
-    "show-unlock"() { ui.unlock = true; render(); },
-    "hide-unlock"() { ui.unlock = false; render(); },
-    signout() { db.session = null; persist(); ui.profileId = null; render(); },
-    "quick-signin"(el) { const u = db.users[el.dataset.email]; signIn(u.name, u.email); render(); },
-    "sample-signin"() {
-      signIn("Jordan Hughes", "jordan@example.com");
-      if (!visibleProfiles().length) actions["load-sample"]();
-      else render();
+    "auth-mode"(el) { ui.authMode = el.dataset.mode; render(); document.getElementById("au-email")?.focus(); },
+    async signout() {
+      try { await api("/api/auth/logout", { method: "POST" }); } catch { /* the cookie is cleared server-side; ignore */ }
+      account = null; db.session = null; persist(); ui.profileId = null; ui.authMode = "login";
+      render();
     },
+    async checkout(el) {
+      if (el) el.disabled = true;
+      try {
+        const { url } = await api("/api/checkout", { method: "POST" });
+        location.href = url;
+      } catch (err) {
+        toast(err.message, true);
+        if (el) el.disabled = false;
+      }
+    },
+    recheck() { loading = true; render(); loadAccount(true); },
     "load-sample"() {
       const p = sampleProfile(me());
       if (commit(null, null, null, () => db.profiles.push(p))) { ui.profileId = p.id; ui.tab = "schedule"; render(); toast("Sample loaded. Try signing in as maria@example.com to see the aide's view."); }
@@ -927,9 +913,10 @@
   // Another tab changed the data: reload it so this tab never overwrites newer entries.
   window.addEventListener("storage", (e) => { if (e.key === STORE_KEY) { db = load(); render(); } });
 
-  if (justSubscribed && !isSubscribed()) ui.unlock = true;
   render();
-  recheckSubscription();
-  // Lock the app if the trial runs out while it is open.
-  setInterval(() => { if (!isSubscribed() && trialDaysLeft() === 0 && !document.querySelector('[data-form="unlock"]')) render(); }, 60000);
+  loadAccount(justSubscribed).then(() => {
+    if (justSubscribed && account?.subscribed) { history.replaceState(null, "", location.pathname); toast("Subscription confirmed. Thank you!"); }
+  });
+  // Re-check access every 10 minutes so an ended trial or cancelled subscription locks the app.
+  setInterval(() => { if (account && !document.querySelector("form[data-form] input:focus")) loadAccount(false); }, 600000);
 })();
