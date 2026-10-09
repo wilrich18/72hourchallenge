@@ -18,6 +18,7 @@
     ["notes", "Doctor's notes"],
     ["logs", "Logs"],
     ["team", "Care team & history"],
+    ["ai", "AI assistant"],
   ];
   const PERMS = {
     family: ["editProfile", "manageTeam", "editSchedule", "followups", "medical", "notes", "logs", "deleteProfile"],
@@ -36,15 +37,18 @@
 
   // ---------- helpers ----------
   const h = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Text people typed (names, medications, notes): shown as written, never machine-translated.
+  const u = (s) => `<span translate="no">${h(s)}</span>`;
   const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
   const localISO = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString(); };
   const todayISO = () => localISO().slice(0, 10);
   const nowTime = () => localISO().slice(11, 16);
-  const fmtDate = (iso) => iso ? new Date(iso + "T00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }) : "";
-  const fmtStamp = (iso) => new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
-  const fmtTime = (t) => { if (!t) return ""; const [hh, mm] = t.split(":").map(Number); return new Date(2000, 0, 1, hh, mm).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); };
+  const LOCALE = window.CareLoopI18n?.locale;
+  const fmtDate = (iso) => iso ? new Date(iso + "T00:00").toLocaleDateString(LOCALE, { weekday: "short", month: "short", day: "numeric", year: "numeric" }) : "";
+  const fmtStamp = (iso) => new Date(iso).toLocaleString(LOCALE, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  const fmtTime = (t) => { if (!t) return ""; const [hh, mm] = t.split(":").map(Number); return new Date(2000, 0, 1, hh, mm).toLocaleTimeString(LOCALE, { hour: "numeric", minute: "2-digit" }); };
   const fmtPhone = (p) => { const d = String(p || "").replace(/\D/g, ""); if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`; if (d.length === 11 && d[0] === "1") return `+1 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`; return p || ""; };
   const fmtSize = (b) => b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.ceil(b / 1024) + " KB";
 
@@ -288,7 +292,7 @@
       ${joinWaiting ? '<div class="notice" style="margin-bottom:1rem">To join the patient profile from your doctor link, confirm your email address first (check your inbox), then reload this page.</div>' : ""}
       ${list.length ? `<div class="profiles">${list.map((p) => `
         <article class="card">
-          <h2 style="font-size:1.3rem;margin:0">${h(p.name)}</h2>
+          <h2 style="font-size:1.3rem;margin:0" translate="no">${h(p.name)}</h2>
           <div><span class="pill accent">${h(ROLE_LABEL[myRole(p)])}</span> ${membership(p).status === "owner" ? '<span class="pill">Owner</span>' : ""}</div>
           <p class="meta" style="margin:0;color:var(--muted)">${p.team.filter((m) => m.status !== "contact").length} people with access · ${p.logs.length} log entries</p>
           <div><button class="btn small" data-action="open-profile" data-id="${p.id}">Open</button></div>
@@ -330,12 +334,12 @@
       <p style="margin:0 0 0.5rem"><button class="btn ghost small" data-action="back">← All profiles</button></p>
       <div class="profile-bar">
         <div>
-          <h1>${h(p.name)}</h1>
-          <div class="profile-meta">${p.dob ? "Born " + h(fmtDate(p.dob)) + " · " : ""}You're the <strong>${h(ROLE_LABEL[role].toLowerCase())}</strong> on this profile</div>
+          <h1 translate="no">${h(p.name)}</h1>
+          <div class="profile-meta">${p.dob ? "Born " + u(fmtDate(p.dob)) + " · " : ""}You're the <strong>${h(ROLE_LABEL[role].toLowerCase())}</strong> on this profile</div>
         </div>
-        ${p.emergency?.name ? `<div class="card" style="padding:0.6rem 0.9rem"><div class="hint">Emergency contact</div><strong>${h(p.emergency.name)}</strong> · <a href="tel:${h(String(p.emergency.phone).replace(/[^\d+]/g, ""))}">${h(fmtPhone(p.emergency.phone))}</a></div>` : ""}
+        ${p.emergency?.name ? `<div class="card" style="padding:0.6rem 0.9rem"><div class="hint">Emergency contact</div><strong translate="no">${h(p.emergency.name)}</strong> · <a href="tel:${h(String(p.emergency.phone).replace(/[^\d+]/g, ""))}">${h(fmtPhone(p.emergency.phone))}</a></div>` : ""}
       </div>
-      ${p.summary ? `<p>${h(p.summary)}</p>` : ""}
+      ${p.summary ? `<p translate="no">${h(p.summary)}</p>` : ""}
       <div class="tabs" role="tablist" aria-label="Profile sections">
         ${TABS.map(([id, label]) => `<button role="tab" id="tab-${id}" aria-controls="panel" aria-selected="${ui.tab === id}" tabindex="${ui.tab === id ? 0 : -1}" data-action="tab" data-tab="${id}">${label}</button>`).join("")}
       </div>
@@ -348,11 +352,12 @@
       case "medical": return medicalPanel(p);
       case "notes": return notesPanel(p);
       case "logs": return logsPanel(p);
+      case "ai": return aiPanel(p);
       default: return teamPanel(p);
     }
   }
 
-  const byline = (e) => `${h(e.byName)} · ${h(ROLE_LABEL[e.byRole] || "")} · ${h(fmtStamp(e.at))}`;
+  const byline = (e) => `${u(e.byName)} · ${h(ROLE_LABEL[e.byRole] || "")} · ${u(fmtStamp(e.at))}`;
   const readOnlyNote = (what) => `<p class="read-only">Your role can view but not change ${what}.</p>`;
   const peopleOptions = (p, selected) => p.team.map((m) => `<option ${m.name === selected ? "selected" : ""}>${h(m.name)}</option>`).join("");
 
@@ -391,8 +396,8 @@
               const overdue = !f.done && f.date < today;
               return `<li class="${f.done ? "done" : ""}">
                 ${fu ? `<input type="checkbox" ${f.done ? "checked" : ""} data-action="toggle-followup" data-id="${f.id}" aria-label="Mark “${h(f.what)}” done">` : ""}
-                <div class="main"><div class="title">${h(f.what)}</div>
-                <div class="meta">${f.kind === "pickup" ? "Prescription pick-up" : "Appointment"} · ${h(f.who)} · ${h(fmtDate(f.date))}
+                <div class="main"><div class="title" translate="no">${h(f.what)}</div>
+                <div class="meta">${f.kind === "pickup" ? "Prescription pick-up" : "Appointment"} · ${u(f.who)} · ${u(fmtDate(f.date))}
                   ${overdue ? ' <span class="pill warn">Overdue</span>' : ""}${f.done ? ' <span class="pill ok">Done</span>' : ""}</div>
                 <div class="meta">Added by ${byline(f)}</div></div>
                 ${fu ? `<div class="actions"><button class="btn small ghost" data-action="del-followup" data-id="${f.id}" aria-label="Delete “${h(f.what)}”">Delete</button></div>` : ""}
@@ -402,7 +407,7 @@
           ${fu ? `
           <form data-form="followup" class="row" style="margin-top:1rem;align-items:end" novalidate>
             <div class="field"><label for="fu-kind">Type</label><select id="fu-kind" name="kind"><option value="appointment">Appointment</option><option value="pickup">Prescription pick-up</option></select></div>
-            <div class="field" style="grid-column:span 2"><label for="fu-what">What</label><input id="fu-what" name="what" placeholder="e.g. Cardiology recheck" required></div>
+            <div class="field" style="grid-column:span 2"><label for="fu-what">What</label><input id="fu-what" name="what" placeholder="e.g. Cardiology recheck" value="${h(ui.prefillWhat || "")}" required></div>
             <div class="field"><label for="fu-who">Who's responsible</label><select id="fu-who" name="who">${peopleOptions(p, me().name)}</select></div>
             <div class="field"><label for="fu-date">Date</label><input id="fu-date" name="date" type="date" value="${today}" required></div>
             <div class="field"><button class="btn" type="submit">Add</button></div>
@@ -421,9 +426,9 @@
           <h2 style="font-size:1.35rem">Diagnoses</h2>
           <ul class="list">
             ${p.diagnoses.map((d) => `<li>
-              <div class="main"><div class="title">${h(d.name)} <span class="pill ${d.status === "active" ? "accent" : ""}">${d.status === "active" ? "Active" : "Resolved"}</span></div>
-              <div class="meta">${h(fmtDate(d.date))}${d.clinician ? " · " + h(d.clinician) : ""}</div>
-              ${d.notes ? `<div>${h(d.notes)}</div>` : ""}
+              <div class="main"><div class="title">${u(d.name)} <span class="pill ${d.status === "active" ? "accent" : ""}">${d.status === "active" ? "Active" : "Resolved"}</span></div>
+              <div class="meta">${u(fmtDate(d.date))}${d.clinician ? " · " + u(d.clinician) : ""}</div>
+              ${d.notes ? `<div translate="no">${h(d.notes)}</div>` : ""}
               <div class="meta">Added by ${byline(d)}</div></div>
               ${edit ? `<div class="actions"><button class="btn small secondary" data-action="toggle-dx" data-id="${d.id}">Mark ${d.status === "active" ? "resolved" : "active"}</button>
                 <button class="btn small ghost" data-action="del-dx" data-id="${d.id}" aria-label="Delete ${h(d.name)}">Delete</button></div>` : ""}
@@ -448,8 +453,8 @@
           <h2 style="font-size:1.35rem">Medications</h2>
           <ul class="list">
             ${p.meds.map((x) => `<li>
-              <div class="main"><div class="title">${h(x.name)} ${x.dose ? "· " + h(x.dose) : ""}</div>
-              <div class="meta">${h(x.timing)}${x.prescriber ? " · Prescribed by " + h(x.prescriber) : ""}</div>
+              <div class="main"><div class="title" translate="no">${h(x.name)} ${x.dose ? "· " + h(x.dose) : ""}</div>
+              <div class="meta">${u(x.timing)}${x.prescriber ? " · Prescribed by " + u(x.prescriber) : ""}</div>
               <div class="meta">Added by ${byline(x)}</div></div>
               ${edit ? `<div class="actions"><button class="btn small ghost" data-action="del-med" data-id="${x.id}" aria-label="Remove ${h(x.name)}">Remove</button></div>` : ""}
             </li>`).join("") || '<li class="empty">No medications recorded.</li>'}
@@ -469,6 +474,7 @@
             <button class="btn" type="submit">Add medication</button>
           </form></details>` : readOnlyNote("medications")}
         </section>
+        ${edit ? scanCard(p) : ""}
 
         <section class="card wide">
           <h2 style="font-size:1.35rem">Allergies, mobility and daily needs</h2>
@@ -495,9 +501,9 @@
           <h2 style="font-size:1.35rem">Notes</h2>
           <ul class="list">
             ${notes.map((n) => `<li><div class="main">
-              <div class="title">${h(fmtDate(n.date))} · ${h(n.doctor)}</div>
+              <div class="title" translate="no">${h(fmtDate(n.date))} · ${h(n.doctor)}</div>
               ${n.dx && dxName(n.dx) ? `<div><span class="pill accent">${h(dxName(n.dx))}</span></div>` : ""}
-              <div style="white-space:pre-wrap">${h(n.text)}</div>
+              <div style="white-space:pre-wrap" translate="no">${h(n.text)}</div>
               <div class="meta">Added by ${byline(n)}</div></div>
               ${edit ? `<div class="actions"><button class="btn small ghost" data-action="del-note" data-id="${n.id}" aria-label="Delete note from ${h(fmtDate(n.date))}">Delete</button></div>` : ""}
             </li>`).join("") || '<li class="empty">No doctor\'s notes yet.</li>'}
@@ -521,7 +527,7 @@
           <h2 style="font-size:1.35rem">Charts and prescriptions</h2>
           <ul class="list">
             ${p.docs.map((d) => `<li><div class="main">
-              <div class="title">${h(d.name)}</div>
+              <div class="title" translate="no">${h(d.name)}</div>
               <div class="meta"><span class="pill">${h(DOC_LABEL[d.label])}</span> ${h(fmtSize(d.size))}</div>
               <div class="meta">Uploaded by ${byline(d)}</div></div>
               <div class="actions"><button class="btn small secondary" data-action="open-doc" data-id="${d.id}">Open</button>
@@ -562,9 +568,9 @@
           <h2 style="font-size:1.35rem">Visit log</h2>
           <ul class="list">
             ${logs.map((l) => `<li><div class="main">
-              <div class="title">${h(fmtDate(l.date))}, ${h(fmtTime(l.time))}</div>
-              <div style="white-space:pre-wrap">${h(l.note)}</div>
-              <div class="meta">${h(l.byName)} · ${h(ROLE_LABEL[l.byRole])}</div></div>
+              <div class="title" translate="no">${h(fmtDate(l.date))}, ${h(fmtTime(l.time))}</div>
+              <div style="white-space:pre-wrap" translate="no">${h(l.note)}</div>
+              <div class="meta">${u(l.byName)} · ${h(ROLE_LABEL[l.byRole])}</div></div>
             </li>`).join("") || '<li class="empty">No log entries yet.</li>'}
           </ul>
         </section>
@@ -578,7 +584,7 @@
       if (m.status === "owner") return '<span class="pill accent">Owner</span>';
       if (m.status === "joined") return '<span class="pill ok">Has access</span>';
       if (m.status === "contact") return '<span class="pill">Contact, no account</span>';
-      return new Date(m.expiresAt).getTime() < now ? '<span class="pill warn">Invite expired</span>' : `<span class="pill">Invited, expires ${h(new Date(m.expiresAt).toLocaleDateString())}</span>`;
+      return new Date(m.expiresAt).getTime() < now ? '<span class="pill warn">Invite expired</span>' : `<span class="pill">Invited, expires <span translate="no">${h(new Date(m.expiresAt).toLocaleDateString(LOCALE))}</span></span>`;
     };
     const groups = ["family", "assisting", "physician"];
     return `
@@ -589,8 +595,8 @@
             const members = p.team.filter((m) => m.role === g);
             return `<h3 style="font-size:1rem;margin-top:1rem">${ROLE_LABEL[g]}s</h3>
             <ul class="list">${members.map((m) => `<li><div class="main">
-              <div class="title">${h(m.name)} ${m.email === me()?.email ? '<span class="hint">(you)</span>' : ""}</div>
-              <div class="meta">${m.email ? h(m.email) : h(fmtPhone(m.phone))}</div>
+              <div class="title">${u(m.name)} ${m.email === me()?.email ? '<span class="hint">(you)</span>' : ""}</div>
+              <div class="meta" translate="no">${m.email ? h(m.email) : h(fmtPhone(m.phone))}</div>
               <div>${statusPill(m)}</div></div>
               ${owner && m.status !== "owner" ? `<div class="actions"><button class="btn small danger" data-action="remove-member" data-id="${m.id}" aria-label="Remove ${h(m.name)}">Remove</button></div>` : ""}
             </li>`).join("") || '<li class="empty">Nobody yet.</li>'}</ul>`;
@@ -643,7 +649,7 @@
             <h3 style="font-size:1rem;margin-top:1.25rem">Active links</h3>
             <ul class="list">${p.shareLinks.map((l) => `<li><div class="main">
               <div class="title">Physician link</div>
-              <div class="meta">Created ${h(fmtStamp(l.createdAt))} by ${h(l.createdByName)} · expires ${h(new Date(l.expiresAt).toLocaleDateString())}</div></div>
+              <div class="meta">Created <span translate="no">${h(fmtStamp(l.createdAt))}</span> by ${u(l.createdByName)} · expires <span translate="no">${h(new Date(l.expiresAt).toLocaleDateString(LOCALE))}</span></div></div>
               <div class="actions"><button class="btn small danger" data-action="revoke-link" data-id="${h(l.id)}">Revoke</button></div></li>`).join("")}</ul>` : ""}
         </section>
         <section class="card wide">
@@ -658,6 +664,143 @@
           <button class="btn danger" data-action="delete-profile">Delete profile</button></div>
         </section>` : ""}
       </div>`;
+  }
+
+
+  // ---------- AI assistant ----------
+  const LANG_NAME = { en: "English" };
+  const replyLanguage = () => {
+    const code = window.CareLoopI18n?.lang || "en";
+    try { return new Intl.DisplayNames(["en"], { type: "language" }).of(code) || "English"; } catch { return LANG_NAME[code] || "English"; }
+  };
+  const aiState = (p) => (ui.ai ||= {})[p.id] ||= { days: 7, chat: loadChat(p.id) };
+  function loadChat(id) { try { return JSON.parse(sessionStorage.getItem("careloop-chat-" + id)) || []; } catch { return []; } }
+  function saveChat(id, chat) { try { sessionStorage.setItem("careloop-chat-" + id, JSON.stringify(chat.slice(-30))); } catch { /* ignore */ } }
+
+  // Minimal formatting for the assistant's replies: escaped text, **bold**, and "- " bullet lists.
+  function formatReply(text) {
+    return String(text).split(/\n{2,}/).map((block) => {
+      const lines = block.split("\n");
+      const fmt = (t) => h(t).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+      if (lines.every((l) => /^\s*[-*•]\s+/.test(l))) return `<ul>${lines.map((l) => `<li>${fmt(l.replace(/^\s*[-*•]\s+/, ""))}</li>`).join("")}</ul>`;
+      return `<p>${lines.map(fmt).join("<br>")}</p>`;
+    }).join("");
+  }
+
+  function aiPanel(p) {
+    const st = aiState(p);
+    const o = st.overview;
+    const examples = [
+      "Can these two medications be taken together?",
+      "What changed this week?",
+      "What should we ask at the next appointment?",
+    ];
+    return `
+      <div class="panel-grid">
+        <p class="notice wide" style="margin:0">The assistant can make mistakes and doesn't replace a doctor or pharmacist. Check with them before starting, stopping or changing any medication. <strong>In an emergency, call 911.</strong></p>
+        <section class="card">
+          <h2 style="font-size:1.35rem">Overview and next steps</h2>
+          <form data-form="ai-overview" class="row" style="align-items:end" novalidate>
+            <div class="field"><label for="ai-days">Period</label><select id="ai-days" name="days">
+              ${[7, 14, 30].map((d) => `<option value="${d}" ${st.days === d ? "selected" : ""}>Last ${d} days</option>`).join("")}</select></div>
+            <div class="field"><button class="btn" type="submit" ${st.loadingOverview ? "disabled" : ""}>${st.loadingOverview ? "Working…" : o ? "Refresh overview" : "Get overview"}</button></div>
+          </form>
+          ${st.overviewError ? `<p class="error-text">${h(st.overviewError)}</p>` : ""}
+          ${st.loadingOverview ? '<p class="hint" role="status">Reading the profile… this can take up to a minute.</p>' : ""}
+          ${o ? `<div class="ai-overview" translate="no">
+            <p><strong>${h(o.headline)}</strong></p>
+            ${o.happened.length ? `<h3>What happened</h3><ul>${o.happened.map((x) => `<li>${h(x)}</li>`).join("")}</ul>` : ""}
+            ${o.watch.length ? `<h3>Keep an eye on</h3><ul>${o.watch.map((x) => `<li>${h(x)}</li>`).join("")}</ul>` : ""}
+            ${o.suggestions.length ? `<h3>Suggested next steps</h3><ul class="list">${o.suggestions.map((x, i) => `<li><div class="main">
+              <div class="title">${h(x.title)}</div><div>${h(x.detail)}</div>${x.who ? `<div class="meta">${h(x.who)}</div>` : ""}</div>
+              ${can(p, "followups") ? `<div class="actions"><button class="btn small secondary" data-action="ai-to-followup" data-i="${i}">Add as follow-up</button></div>` : ""}</li>`).join("")}</ul>` : ""}
+            ${o.askTheDoctor.length ? `<h3>Questions for the doctor</h3><ul>${o.askTheDoctor.map((x) => `<li>${h(x)}</li>`).join("")}</ul>` : ""}
+          </div>` : !st.loadingOverview ? '<p class="hint">Get a summary of recent logs, notes and follow-ups, with suggestions for what to do next.</p>' : ""}
+        </section>
+        <section class="card">
+          <h2 style="font-size:1.35rem">Ask Care Loop</h2>
+          <div class="chat" id="ai-chat-log" aria-live="polite">
+            ${st.chat.map((m) => `<div class="bubble ${m.role}" ${m.role === "assistant" ? 'translate="no"' : 'translate="no"'}>${m.role === "assistant" ? formatReply(m.content) : h(m.content)}</div>`).join("")}
+            ${st.sending ? '<div class="bubble assistant typing" role="status">Thinking…</div>' : ""}
+            ${!st.chat.length && !st.sending ? `<p class="hint">Ask about medications, symptoms in the logs, or what to bring up with the doctor. For example:</p>
+              <div class="chips">${examples.map((x) => `<button class="chip" data-action="ai-example" data-text="${h(x)}">${h(x)}</button>`).join("")}</div>` : ""}
+          </div>
+          ${st.chatError ? `<p class="error-text">${h(st.chatError)}</p>` : ""}
+          <form data-form="ai-chat" novalidate>
+            <label for="ai-q" class="sr-only">Your question</label>
+            <textarea id="ai-q" name="q" rows="2" placeholder="e.g. Can she take ibuprofen with lisinopril?" required>${h(st.draft || "")}</textarea>
+            <div class="cta-row" style="margin-top:0.5rem">
+              <button class="btn" type="submit" ${st.sending ? "disabled" : ""}>Send</button>
+              ${st.chat.length ? '<button class="btn ghost" type="button" data-action="ai-clear">Clear chat</button>' : ""}
+            </div>
+            <p class="hint">Chats stay on this device and aren't saved to the profile.</p>
+          </form>
+        </section>
+      </div>`;
+  }
+
+  async function sendChat(p, text) {
+    const st = aiState(p);
+    if (!navigator.onLine) { st.chatError = "You're offline."; return render(); }
+    st.chat.push({ role: "user", content: text });
+    st.sending = true; st.chatError = null; st.draft = "";
+    render(); scrollChat();
+    try {
+      const { answer } = await api(`/api/ai?action=chat`, { method: "POST", body: { profileId: p.id, messages: st.chat, language: replyLanguage() } });
+      st.chat.push({ role: "assistant", content: answer });
+    } catch (err) {
+      st.chat.pop();
+      st.draft = text;
+      st.chatError = err.message;
+    }
+    st.sending = false;
+    saveChat(p.id, st.chat);
+    if (ui.profileId === p.id && ui.tab === "ai") { render(); scrollChat(); document.getElementById("ai-q")?.focus(); }
+  }
+  const scrollChat = () => { const el = document.getElementById("ai-chat-log"); if (el) el.scrollTop = el.scrollHeight; };
+
+  // ---------- prescription receipt scan ----------
+  function scanCard(p) {
+    const sc = ui.scan && ui.scan.profileId === p.id ? ui.scan : null;
+    return `
+        <section class="card wide" id="scan-card">
+          <h2 style="font-size:1.35rem">Scan a prescription receipt</h2>
+          <p>Take or choose a photo of a pharmacy receipt or bottle label. Care Loop reads the medications on it so you can check them and add them here.</p>
+          <form data-form="scan" class="row" style="align-items:end" novalidate>
+            <div class="field" style="grid-column:span 2"><label for="scan-photo">Photo</label><input id="scan-photo" name="photo" type="file" accept="image/*" capture="environment" required></div>
+            <div class="field"><button class="btn" type="submit" ${sc?.loading ? "disabled" : ""}>${sc?.loading ? "Reading…" : "Read receipt"}</button></div>
+            <p class="error-text" data-error ${sc?.error ? "" : "hidden"} style="grid-column:1/-1">${h(sc?.error || "")}</p>
+          </form>
+          ${sc && sc.meds ? `
+            ${sc.message ? `<p class="hint">${h(sc.message)}</p>` : ""}
+            ${sc.meds.length ? `
+            <p class="notice">Check every line against the label before adding. A misread name or dose can be dangerous. You can fix anything below.</p>
+            <ul class="list">${sc.meds.map((m, i) => `<li><input type="checkbox" id="scan-use-${i}" ${m.use ? "checked" : ""} data-scan-i="${i}" aria-label="Add this medication">
+              <div class="main"><div class="row">
+                <div class="field"><label for="scan-name-${i}">Name</label><input id="scan-name-${i}" value="${h(m.name)}" translate="no"></div>
+                <div class="field"><label for="scan-dose-${i}">Dose</label><input id="scan-dose-${i}" value="${h(m.dose)}" translate="no"></div>
+                <div class="field"><label for="scan-timing-${i}">When</label><input id="scan-timing-${i}" value="${h(m.timing)}" translate="no"></div>
+                <div class="field"><label for="scan-pres-${i}">Prescriber</label><input id="scan-pres-${i}" value="${h(m.prescriber)}" translate="no"></div>
+              </div>
+              <div class="meta">${m.confidence === "low" ? '<span class="pill warn">Hard to read: double-check</span>' : m.confidence === "medium" ? '<span class="pill">Check carefully</span>' : '<span class="pill ok">Clearly printed</span>'}
+                ${m.quantity ? ` · Qty <span translate="no">${h(m.quantity)}</span>` : ""}${m.fillDate ? ` · Filled <span translate="no">${h(m.fillDate)}</span>` : ""}</div></div></li>`).join("")}</ul>
+            <div class="cta-row" style="margin-top:0.5rem"><button class="btn" data-action="scan-add">Add selected to medications</button>
+              <button class="btn ghost" data-action="scan-discard">Discard</button></div>` : '<p>No medications found on that photo. Try a clearer, well-lit photo of the label.</p>'}` : ""}
+          <p class="hint" style="margin-top:0.75rem">The photo is only used to read the medications. It isn't saved.</p>
+        </section>`;
+  }
+
+  // Shrink the photo before sending: smaller upload, faster reading.
+  async function photoToJpeg(file) {
+    let bitmap;
+    try { bitmap = await createImageBitmap(file); } catch { throw new Error("This photo format can't be read here. Please use a JPEG or PNG photo."); }
+    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+    return dataUrl.slice(dataUrl.indexOf(",") + 1);
   }
 
   // ---------- form handling ----------
@@ -722,6 +865,47 @@
   }
 
   const forms = {
+    async "ai-overview"(f, p) {
+      const st = aiState(p);
+      st.days = Number(val(f, "days")) || 7;
+      if (!navigator.onLine) { st.overviewError = "You're offline."; return render(); }
+      st.loadingOverview = true; st.overviewError = null;
+      render();
+      try {
+        const { overview } = await api(`/api/ai?action=overview`, { method: "POST", body: { profileId: p.id, days: st.days, language: replyLanguage() } });
+        st.overview = overview;
+      } catch (err) {
+        st.overviewError = err.message;
+      }
+      st.loadingOverview = false;
+      if (ui.profileId === p.id && ui.tab === "ai") render();
+    },
+    "ai-chat"(f, p) {
+      const text = val(f, "q");
+      if (!text) return;
+      sendChat(p, text);
+    },
+    async scan(f, p) {
+      const file = f.elements.photo.files[0];
+      if (!file) return formError(f, "Please choose a photo.");
+      if (!file.type.startsWith("image/")) return formError(f, "Please choose a photo (JPEG or PNG).");
+      if (!navigator.onLine) return formError(f, "You're offline.");
+      ui.scan = { profileId: p.id, loading: true };
+      render();
+      try {
+        const image = await photoToJpeg(file);
+        const r = await api(`/api/ai?action=scan-receipt`, { method: "POST", body: { profileId: p.id, image, mediaType: "image/jpeg" } });
+        ui.scan = {
+          profileId: p.id,
+          message: r.readable ? r.message : r.message || "That photo couldn't be read as a prescription receipt.",
+          meds: r.readable ? r.medications.map((m) => ({ ...m, use: m.confidence !== "low" })) : [],
+        };
+      } catch (err) {
+        ui.scan = { profileId: p.id, error: err.message };
+      }
+      if (ui.profileId === p.id) { render(); document.getElementById("scan-card")?.scrollIntoView({ block: "start" }); }
+    },
+
     async signup(f) {
       if (!requireFields(f, ["name", "email", "password"])) return;
       if (!validEmail(val(f, "email"))) return formError(f, "Please enter a valid email address.");
@@ -854,6 +1038,39 @@
   };
 
   const actions = {
+    "ai-example"(el, p) { aiState(p).draft = el.dataset.text; render(); const q = document.getElementById("ai-q"); q?.focus(); q?.setSelectionRange(q.value.length, q.value.length); },
+    "ai-clear"(el, p) { const st = aiState(p); st.chat = []; st.chatError = null; saveChat(p.id, []); render(); },
+    "ai-to-followup"(el, p) {
+      const sug = aiState(p).overview?.suggestions?.[Number(el.dataset.i)];
+      if (!sug) return;
+      ui.prefillWhat = sug.title;
+      ui.tab = "schedule";
+      render();
+      ui.prefillWhat = "";
+      const input = document.getElementById("fu-what");
+      input?.scrollIntoView({ block: "center" });
+      input?.focus();
+      toast("Pick who's responsible and a date, then press Add.");
+    },
+    "scan-discard"() { ui.scan = null; render(); },
+    "scan-add"(el, p) {
+      const sc = ui.scan;
+      if (!sc?.meds) return;
+      const picked = sc.meds.map((m, i) => ({
+        use: document.getElementById(`scan-use-${i}`)?.checked,
+        name: document.getElementById(`scan-name-${i}`)?.value.trim(),
+        dose: document.getElementById(`scan-dose-${i}`)?.value.trim(),
+        timing: document.getElementById(`scan-timing-${i}`)?.value.trim(),
+        prescriber: document.getElementById(`scan-pres-${i}`)?.value.trim(),
+      })).filter((m) => m.use && m.name);
+      if (!picked.length) return toast("Tick at least one medication with a name.", true);
+      const items = picked.map((m) => ({ id: uid(), name: m.name, dose: m.dose, timing: m.timing, prescriber: m.prescriber, source: "receipt scan", ...stamp() }));
+      if (commit(p, "medical", `Added ${items.length} medication${items.length === 1 ? "" : "s"} from a receipt scan`, () => p.meds.push(...items))) {
+        ui.scan = null;
+        render();
+      }
+    },
+
     "auth-mode"(el) { ui.authMode = el.dataset.mode; render(); document.getElementById("au-email")?.focus(); },
     async signout() {
       try { await api("/api/auth?action=logout", { method: "POST" }); } catch { /* the cookie is cleared server-side; ignore */ }
@@ -999,6 +1216,16 @@
     const el = e.target.closest("[data-action]");
     if (!el || el.type === "checkbox") return;
     actions[el.dataset.action]?.(el, currentProfile());
+  });
+  // Enter sends a chat message; Shift+Enter adds a new line.
+  document.addEventListener("keydown", (e) => {
+    if (e.target.id === "ai-q" && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      e.target.form.requestSubmit();
+    }
+  });
+  document.addEventListener("input", (e) => {
+    if (e.target.id === "ai-q") { const p = currentProfile(); if (p) aiState(p).draft = e.target.value; }
   });
   document.addEventListener("change", (e) => {
     const el = e.target.closest('input[type="checkbox"][data-action]');

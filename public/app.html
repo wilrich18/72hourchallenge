@@ -11,14 +11,15 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
+  <script src="/i18n.js"></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
   <div class="offline-banner" id="offline" hidden>You're offline. Nothing will be saved until you reconnect.</div>
   <header class="app-header">
     <div class="wrap">
-      <a class="brand" href="/"><img class="brand-mark" src="/logo.svg" alt=""> Care Loop</a>
-      <div class="who" id="who"></div>
+      <a class="brand" href="/" translate="no"><img class="brand-mark" src="/logo.svg" alt=""> Care Loop</a>
+      <div style="display:flex;gap:0.5rem;align-items:center"><div data-lang-picker="app"></div><div class="who" id="who"></div></div>
     </div>
   </header>
   <div class="demo-banner">

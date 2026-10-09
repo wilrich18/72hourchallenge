@@ -15,6 +15,17 @@ Everything is stored on the server: accounts, care profiles and uploaded files. 
 - **Uploads:** PDFs and images up to 20 MB go straight from the browser to private Blob storage (`api/files.js` checks the uploader's role first). Downloads are only served to people on that profile. Deleting an upload or a profile deletes the stored files.
 - **Saving** shows "Saving…", then "Saved" or a plain "Not saved" message. If someone else changed the profile in the meantime, the change is refused and the latest version is loaded. Offline, nothing is saved.
 
+## AI features (Claude)
+
+`api/ai.js` calls Claude (`claude-opus-5-5`) through the official Anthropic SDK, with server-side refusal fallbacks turned on (`fallbacks: "default"`), so a declined request is retried on Anthropic's recommended fallback model.
+
+- **AI assistant tab** (after Care team & history), for everyone on the profile:
+  - **Overview and next steps:** a summary of the last 7, 14 or 30 days, things to keep an eye on, suggested next steps (each can be turned into a follow-up), and questions for the doctor. Uses structured output.
+  - **Ask Care Loop:** a chat that answers questions using the care profile, e.g. "Can she take ibuprofen with lisinopril?". It gives general information, never tells people to start, stop or change a dose, points them to the doctor or pharmacist, and tells them to call 911 for anything urgent. Chats stay in the browser tab (sessionStorage) and aren't saved to the profile.
+- **Scan a prescription receipt** (Medical History, for family caregivers and physicians): a photo is shrunk in the browser, read by Claude, and shown as an editable list. Unclear lines are flagged and left unticked. Nothing is added until the person checks and confirms it. The photo isn't stored.
+- **Language picker** (header of both pages, 31 languages, right-to-left for Arabic, Hebrew, Persian and Urdu): interface text is translated by Claude on demand, cached per language in Blob (`i18n/`) and in the browser. Text people typed (names, medications, notes, logs) is marked `translate="no"` and stays as written. The assistant answers in the chosen language.
+- Each account can make 80 overview, chat and scan requests a day. Translation is cached, so each string is translated once per language.
+
 ## Accounts, free trial and subscription
 
 - People create a Care Loop account (name, email, password of at least 10 characters). No credit card is needed. A confirmation email is sent, and a banner reminds them until they confirm.
@@ -23,7 +34,7 @@ Everything is stored on the server: accounts, care profiles and uploaded files. 
 - The 7-day free trial starts at sign-up. After it ends, the family caregiver needs an active $20/month Whop subscription (plan `plan_dIPsSbDYnGhzG`) to keep using Care Loop and to create profiles. People invited onto someone's care team (aides, nurses, doctors) use it free.
 - "Continue to payment" calls `api/checkout.js`, which creates a Whop checkout tagged with the account's email, so the payment is matched to the account even if a different email is used at Whop. After paying, Whop sends people back to `/app?subscribed=1`. Subscription status is cached for 6 hours and can be re-checked on demand.
 
-Server functions (5, within the Vercel Hobby limit of 12): `api/auth.js` (`?action=signup|login|logout|me|verify|resend-verification|forgot|reset`), `api/profiles.js`, `api/files.js`, `api/checkout.js`, `api/early-access.js`. Shared code is in `api/_lib.js`, `api/_profiles.js` and `api/_sample.js`.
+Server functions (6, within the Vercel Hobby limit of 12): `api/ai.js`, `api/auth.js` (`?action=signup|login|logout|me|verify|resend-verification|forgot|reset`), `api/profiles.js`, `api/files.js`, `api/checkout.js`, `api/early-access.js`. Shared code is in `api/_lib.js`, `api/_profiles.js` and `api/_sample.js`.
 
 Storage: the private `careloop-accounts` Vercel Blob store holds `users/` (one JSON per account, passwords hashed with scrypt), `profiles/`, `access/` (which profiles each email can open) and `files/`. Sessions are signed, HttpOnly cookies that last 14 days.
 
@@ -39,6 +50,7 @@ Environment variables (Vercel, then Settings, then Environment Variables):
 | `EMAIL_FROM` | recommended | Sender, e.g. `Care Loop <hello@yourdomain.com>` on a domain verified in Resend. Defaults to Resend's test sender, which only delivers to your own Resend account email. |
 | `WHOP_API_KEY` | yes, for payments | Whop company API key that can read members (including email) and memberships and create checkout configurations. Without it, nobody can get back in after their trial. |
 | `WHOP_COMPANY_ID`, `WHOP_PLAN_ID` | no | Override the default business and plan |
+| `ANTHROPIC_API_KEY` | yes, for AI | Claude API key from console.anthropic.com. Without it the AI tab, receipt scan and translations show "isn't set up yet" and the site stays in English. |
 
 Not built yet: two-step sign-in, an audit log of who viewed what (P3), and a data-exposure plan (P9).
 
