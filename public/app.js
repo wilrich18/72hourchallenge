@@ -1,12 +1,11 @@
-/* Care Loop web app (early version).
- * Everything is stored in this browser (localStorage, plus IndexedDB for uploaded files).
- * Roles and permissions follow the PRD's proposed permissions table, but they are only
- * enforced in the browser here; the real release must enforce them on the server (P2).
+/* Care Loop web app.
+ * Accounts, care profiles and uploads are stored on the server (see /api). Role permissions
+ * from the PRD are checked here for a friendly message and enforced again by the server.
  */
 (() => {
   "use strict";
 
-  const STORE_KEY = "careloop-demo-v1";
+  const JOIN_KEY = "careloop-pending-join";
   const MIN_PASSWORD = 10;
   const INVITE_DAYS = 7;
   const MAX_UPLOAD = 20 * 1024 * 1024;
@@ -30,7 +29,10 @@
   const trialBanner = document.getElementById("trial-banner");
   const who = document.getElementById("who");
   const ui = { profileId: null, tab: "schedule" };
-  let db = load();
+  const db = { profiles: [] };
+  let profilesLoaded = false;
+  let pendingInvites = 0;
+  const savingIds = new Set();
 
   // ---------- helpers ----------
   const h = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -46,17 +48,6 @@
   const fmtPhone = (p) => { const d = String(p || "").replace(/\D/g, ""); if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`; if (d.length === 11 && d[0] === "1") return `+1 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`; return p || ""; };
   const fmtSize = (b) => b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.ceil(b / 1024) + " KB";
 
-  function load() {
-    try {
-      const raw = localStorage.getItem(STORE_KEY);
-      if (raw) return JSON.parse(raw);
-    } catch { /* fall through */ }
-    return { session: null, users: {}, profiles: [] };
-  }
-  function persist() {
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
-  }
-
   function toast(msg, isErr) {
     const region = document.getElementById("toast-region");
     region.innerHTML = `<div class="toast${isErr ? " err" : ""}" role="${isErr ? "alert" : "status"}">${h(msg)}</div>`;
@@ -64,64 +55,82 @@
     toast.t = setTimeout(() => { region.innerHTML = ""; }, isErr ? 6000 : 2200);
   }
 
-  const me = () => db.session && db.users[db.session];
+  const me = () => account && account.user;
   const stamp = () => ({ byName: me().name, byEmail: me().email, byRole: myRole(currentProfile()) || "family", at: new Date().toISOString() });
   const currentProfile = () => db.profiles.find((p) => p.id === ui.profileId) || null;
 
-  function membership(p, email = db.session) {
+  function membership(p, email = me()?.email) {
     return p.team.find((m) => m.email && m.email === email && (m.status === "owner" || m.status === "joined"));
   }
   function myRole(p) { const m = p && membership(p); return m ? m.role : null; }
   function can(p, action) { const r = myRole(p); return !!r && PERMS[r].includes(action); }
   const visibleProfiles = () => db.profiles.filter((p) => membership(p));
 
-  // Every change goes through here: role check, offline check, history entry, save, rollback on failure.
+  // Every change goes through here: offline and role checks, a history entry, then a save
+  // to the server. The change shows straight away; if the server refuses it, it's undone.
   function commit(p, action, historyText, mutate) {
     if (!navigator.onLine) { toast("Not saved: you're offline.", true); return false; }
-    if (p && !can(p, action)) { toast("Not saved: your role can't make this change.", true); return false; }
-    const before = clone(db);
+    if (!can(p, action)) { toast("Not saved: your role can't make this change.", true); return false; }
+    if (savingIds.has(p.id)) { toast("Still saving your last change. Try again in a moment.", true); return false; }
+    const before = clone(p);
+    mutate();
+    p.history.unshift({ id: uid(), text: historyText, ...stamp() });
+    save(p, before);
+    return true;
+  }
+
+  async function save(p, before) {
+    savingIds.add(p.id);
+    toast("Saving…");
     try {
-      mutate();
-      if (p) p.history.unshift({ id: uid(), text: historyText, ...stamp() });
-      persist();
+      const { profile } = await api(`/api/profiles?id=${encodeURIComponent(p.id)}`, { method: "PUT", body: { profile: p, version: p.version } });
+      replaceProfile(p, profile);
       toast("Saved");
-      return true;
+      if (!document.activeElement?.closest("form")) render();
     } catch (err) {
-      db = before;
-      toast("Not saved: " + (err.name === "QuotaExceededError" ? "this browser's storage is full." : err.message), true);
-      return false;
+      replaceProfile(p, err.data?.profile || before);
+      toast("Not saved: " + err.message, true);
+      render();
+    } finally {
+      savingIds.delete(p.id);
     }
   }
 
-  // ---------- IndexedDB for uploads ----------
-  const idb = (() => {
-    let dbp;
-    const open = () => dbp || (dbp = new Promise((res, rej) => {
-      const r = indexedDB.open("careloop-files", 1);
-      r.onupgradeneeded = () => r.result.createObjectStore("files");
-      r.onsuccess = () => res(r.result);
-      r.onerror = () => rej(r.error);
-    }));
-    const tx = (mode, fn) => open().then((d) => new Promise((res, rej) => {
-      const t = d.transaction("files", mode);
-      const req = fn(t.objectStore("files"));
-      t.oncomplete = () => res(req && req.result);
-      t.onerror = () => rej(t.error);
-    }));
-    return {
-      put: (id, blob) => tx("readwrite", (s) => s.put(blob, id)),
-      get: (id) => tx("readonly", (s) => s.get(id)),
-      del: (id) => tx("readwrite", (s) => s.delete(id)),
-    };
-  })();
+  // Swap in the server's copy, keeping the same object so open views stay attached.
+  function replaceProfile(p, fresh) {
+    for (const k of Object.keys(p)) delete p[k];
+    Object.assign(p, fresh);
+  }
+
+  async function loadProfiles() {
+    try {
+      const data = await api("/api/profiles");
+      db.profiles = data.profiles;
+      pendingInvites = data.pendingInvites || 0;
+      profilesLoaded = true;
+    } catch (err) {
+      toast("Couldn't load your profiles: " + err.message, true);
+    }
+  }
 
   // ---------- account, free trial and subscription ----------
-  // Accounts live on the server (api/auth/*). The 7-day trial starts when the account is
-  // created; after that the server only grants access with an active Whop subscription.
-  let account = null;   // response from /api/auth/me, or null when signed out
+  // The 7-day trial starts when the account is created; after that the server only grants
+  // access with an active Whop subscription, or to people invited onto someone's care team.
+  let account = null;   // response from /api/auth?action=me, or null when signed out
   let loading = true;
-  const justSubscribed = new URLSearchParams(location.search).has("subscribed");
-  if (new URLSearchParams(location.search).has("login")) ui.authMode = "login";
+  const params = new URLSearchParams(location.search);
+  const justSubscribed = params.has("subscribed");
+  if (params.has("login")) ui.authMode = "login";
+  if (params.has("reset")) { ui.authMode = "reset"; ui.reset = { token: params.get("reset"), email: params.get("email") || "" }; }
+  if (params.has("join") && params.has("profile")) {
+    try { sessionStorage.setItem(JOIN_KEY, JSON.stringify({ token: params.get("join"), profileId: params.get("profile") })); } catch { /* ignore */ }
+  }
+  const pendingJoin = () => { try { return JSON.parse(sessionStorage.getItem(JOIN_KEY)); } catch { return null; } };
+  if (pendingJoin() && !ui.authMode) ui.authMode = "signup";
+  const verifiedParam = params.get("verified");
+  if ([...params.keys()].some((k) => ["reset", "email", "join", "profile", "verified", "login"].includes(k))) {
+    history.replaceState(null, "", location.pathname + (justSubscribed ? "?subscribed=1" : ""));
+  }
 
   async function api(path, options = {}) {
     const r = await fetch(path, {
@@ -131,15 +140,15 @@
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw Object.assign(new Error(data.error || "Something went wrong. Please try again."), { status: r.status });
+    if (!r.ok) throw Object.assign(new Error(data.error || "Something went wrong. Please try again."), { status: r.status, data });
     return data;
   }
 
   // Ask the server who is signed in and whether they can use the app.
   async function loadAccount(refresh) {
     try {
-      account = await api("/api/auth/me" + (refresh ? "?refresh=1" : ""));
-      useAccount();
+      account = await api("/api/auth?action=me" + (refresh ? "&refresh=1" : ""));
+      await afterSignIn();
     } catch (err) {
       if (err.status === 401) account = null;
       else if (!account) toast(err.message, true);
@@ -148,37 +157,93 @@
     render();
   }
 
-  // Make the signed-in account the person acting in the app.
-  function useAccount() {
-    if (account && db.session !== account.user.email) signIn(account.user.name, account.user.email);
+  // Once signed in with access: load profiles and finish joining from a doctor link.
+  async function afterSignIn() {
+    if (!account?.access) return;
+    await loadProfiles();
+    const join = pendingJoin();
+    if (!join) return;
+    try {
+      const { profile } = await api("/api/profiles?action=join", { method: "POST", body: join });
+      sessionStorage.removeItem(JOIN_KEY);
+      const i = db.profiles.findIndex((x) => x.id === profile.id);
+      if (i >= 0) db.profiles[i] = profile; else db.profiles.push(profile);
+      ui.profileId = profile.id;
+      ui.tab = "medical";
+      toast(`You've joined ${profile.name}'s care team.`);
+    } catch (err) {
+      if (!err.data?.needsVerification) sessionStorage.removeItem(JOIN_KEY);
+      toast(err.message, true);
+    }
   }
 
   function renderTrialBanner() {
-    if (!account) { trialBanner.innerHTML = "<strong>7-day free trial.</strong> No credit card needed."; return; }
-    if (account.subscribed) { trialBanner.innerHTML = "<strong>You're subscribed to Care Loop.</strong> Thank you!"; return; }
-    const left = account.trial.daysLeft;
-    trialBanner.innerHTML = account.trial.active
-      ? `<strong>Free trial: ${left} day${left === 1 ? "" : "s"} left.</strong> <button class="linklike" data-action="checkout">Subscribe for $20/month</button> to keep using Care Loop after that.`
-      : "<strong>Your free trial has ended.</strong>";
+    let html;
+    if (!account) html = "<strong>7-day free trial.</strong> No credit card needed.";
+    else if (account.subscribed) html = "<strong>You're subscribed to Care Loop.</strong> Thank you!";
+    else if (account.trial.active) {
+      const left = account.trial.daysLeft;
+      html = `<strong>Free trial: ${left} day${left === 1 ? "" : "s"} left.</strong> <button class="linklike" data-action="checkout">Subscribe for $20/month</button> to keep using Care Loop after that.`;
+    } else if (account.access) html = "<strong>You're on a care team.</strong> Care Loop is free for people invited by a family caregiver.";
+    else html = "<strong>Your free trial has ended.</strong>";
+    if (account && !account.verified) {
+      html += `<br><strong>Please confirm your email.</strong> We sent a link to ${h(account.user.email)}. <button class="linklike" data-action="resend-verification">Send it again</button>`;
+    }
+    trialBanner.innerHTML = html;
   }
 
   function renderAuth() {
-    const signup = ui.authMode !== "login";
+    const mode = ui.authMode || "signup";
+    const joining = !!pendingJoin();
+    const intro = joining
+      ? "<p class=\"notice ok-notice\">You've been invited to view and edit a patient's Care Loop profile as their doctor. Create a free account or log in to join.</p>"
+      : "";
+    if (mode === "forgot") {
+      view.innerHTML = `
+        <div class="signin">
+          <h1>Reset your password</h1>
+          <p>Enter your email and we'll send you a link to choose a new password.</p>
+          <form class="card" data-form="forgot" novalidate>
+            <div class="field"><label for="au-email">Email</label><input id="au-email" name="email" type="email" autocomplete="email" required></div>
+            <p class="error-text" data-error hidden></p>
+            <p class="form-status ok" data-ok hidden></p>
+            <button class="btn" type="submit">Email me a reset link</button>
+          </form>
+          <p style="margin-top:1rem"><button class="linklike" data-action="auth-mode" data-mode="login">Back to log in</button></p>
+        </div>`;
+      return;
+    }
+    if (mode === "reset") {
+      view.innerHTML = `
+        <div class="signin">
+          <h1>Choose a new password</h1>
+          <p>For ${h(ui.reset?.email || "your account")}. This logs you out on every other device.</p>
+          <form class="card" data-form="reset" novalidate>
+            <div class="field"><label for="au-pw">New password <span class="hint">(at least ${MIN_PASSWORD} characters)</span></label>
+              <input id="au-pw" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD}" required></div>
+            <p class="error-text" data-error hidden></p>
+            <button class="btn" type="submit">Save new password</button>
+          </form>
+        </div>`;
+      return;
+    }
+    const signup = mode !== "login";
     view.innerHTML = `
       <div class="signin">
-        <h1>${signup ? "Start your free trial" : "Log in"}</h1>
-        <p>${signup ? "Create your Care Loop account to start a 7-day free trial. <strong>No credit card needed.</strong>" : "Welcome back. Log in to your Care Loop account."}</p>
+        ${intro}
+        <h1>${signup ? (joining ? "Create your account" : "Start your free trial") : "Log in"}</h1>
+        <p>${signup ? (joining ? "It's free for doctors invited by a family caregiver." : "Create your Care Loop account to start a 7-day free trial. <strong>No credit card needed.</strong>") : "Welcome back. Log in to your Care Loop account."}</p>
         <form class="card" data-form="${signup ? "signup" : "login"}" novalidate>
           ${signup ? '<div class="field"><label for="au-name">Your name</label><input id="au-name" name="name" autocomplete="name" required></div>' : ""}
           <div class="field"><label for="au-email">Email</label><input id="au-email" name="email" type="email" autocomplete="email" required></div>
           <div class="field"><label for="au-pw">Password ${signup ? `<span class="hint">(at least ${MIN_PASSWORD} characters)</span>` : ""}</label>
             <input id="au-pw" name="password" type="password" autocomplete="${signup ? "new-password" : "current-password"}" minlength="${signup ? MIN_PASSWORD : 1}" required></div>
           <p class="error-text" data-error hidden></p>
-          <button class="btn" type="submit">${signup ? "Create account and start trial" : "Log in"}</button>
+          <button class="btn" type="submit">${signup ? (joining ? "Create account" : "Create account and start trial") : "Log in"}</button>
         </form>
         <p style="margin-top:1rem">${signup
           ? 'Already have an account? <button class="linklike" data-action="auth-mode" data-mode="login">Log in</button>'
-          : 'New to Care Loop? <button class="linklike" data-action="auth-mode" data-mode="signup">Start a free trial</button>'}</p>
+          : 'New to Care Loop? <button class="linklike" data-action="auth-mode" data-mode="signup">Create an account</button> · <button class="linklike" data-action="auth-mode" data-mode="forgot">Forgot your password?</button>'}</p>
       </div>`;
   }
 
@@ -207,6 +272,7 @@
     if (loading) { view.innerHTML = '<p class="hint" role="status">Loading…</p>'; return; }
     if (!account) return renderAuth();
     if (!account.access) return renderPaywall();
+    if (!profilesLoaded) { view.innerHTML = '<p class="hint" role="status">Loading your profiles…</p>'; return; }
     const p = currentProfile();
     if (p && membership(p)) return renderProfile(p);
     ui.profileId = null;
@@ -215,10 +281,11 @@
 
   function renderProfiles() {
     const list = visibleProfiles();
-    const pending = db.profiles.filter((p) => p.team.some((m) => m.email === db.session && m.status === "invited"));
+    const joinWaiting = !!pendingJoin() && !account.verified;
     view.innerHTML = `
       <div class="profile-bar"><h1>Your care profiles</h1></div>
-      ${pending.length ? `<div class="notice" style="margin-bottom:1rem">You have ${pending.length} invitation(s) that expired. Ask the family caregiver to invite you again.</div>` : ""}
+      ${pendingInvites ? `<div class="notice" style="margin-bottom:1rem">You've been invited to ${pendingInvites} care profile${pendingInvites === 1 ? "" : "s"}. Confirm your email address (check your inbox) to accept.</div>` : ""}
+      ${joinWaiting ? '<div class="notice" style="margin-bottom:1rem">To join the patient profile from your doctor link, confirm your email address first (check your inbox), then reload this page.</div>' : ""}
       ${list.length ? `<div class="profiles">${list.map((p) => `
         <article class="card">
           <h2 style="font-size:1.3rem;margin:0">${h(p.name)}</h2>
@@ -226,13 +293,16 @@
           <p class="meta" style="margin:0;color:var(--muted)">${p.team.filter((m) => m.status !== "contact").length} people with access · ${p.logs.length} log entries</p>
           <div><button class="btn small" data-action="open-profile" data-id="${p.id}">Open</button></div>
         </article>`).join("")}</div>`
-        : `<div class="card"><p>You don't have any care profiles yet. Create one for the person you care for, or load a sample to look around.</p>
-            <button class="btn secondary" data-action="load-sample">Load a sample profile</button></div>`}
+        : account.ownerAccess
+          ? `<div class="card"><p>You don't have any care profiles yet. Create one for the person you care for, or load a sample to look around.</p>
+            <button class="btn secondary" data-action="load-sample">Load a sample profile</button></div>`
+          : '<div class="card"><p>You\'re not on any care profiles right now.</p></div>'}
+      ${account.ownerAccess ? `
       <details class="card" style="margin-top:1.25rem" ${list.length ? "" : "open"}>
         <summary>Create a new profile</summary>
         <p class="hint">You'll be the owner and family caregiver on this profile.</p>
         ${profileFields({})}
-      </details>`;
+      </details>` : `<p class="hint" style="margin-top:1.25rem">Want to create profiles of your own? <button class="linklike" data-action="checkout">Subscribe for $20/month</button>.</p>`}`;
   }
 
   function profileFields(p, readOnly) {
@@ -519,7 +589,7 @@
             const members = p.team.filter((m) => m.role === g);
             return `<h3 style="font-size:1rem;margin-top:1rem">${ROLE_LABEL[g]}s</h3>
             <ul class="list">${members.map((m) => `<li><div class="main">
-              <div class="title">${h(m.name)} ${m.email === db.session ? '<span class="hint">(you)</span>' : ""}</div>
+              <div class="title">${h(m.name)} ${m.email === me()?.email ? '<span class="hint">(you)</span>' : ""}</div>
               <div class="meta">${m.email ? h(m.email) : h(fmtPhone(m.phone))}</div>
               <div>${statusPill(m)}</div></div>
               ${owner && m.status !== "owner" ? `<div class="actions"><button class="btn small danger" data-action="remove-member" data-id="${m.id}" aria-label="Remove ${h(m.name)}">Remove</button></div>` : ""}
@@ -538,7 +608,7 @@
             <div class="field"><label for="iv-role">Role</label><select id="iv-role" name="role">
               <option value="assisting">Assisting caregiver</option><option value="physician">Physician</option><option value="family">Family caregiver</option></select></div>
             <div class="field"><label class="check"><input type="checkbox" name="authority" required> I have the authority to share this person's health information with them.</label></div>
-            <p class="hint">Invitations expire after ${INVITE_DAYS} days. For now, the person accepts by signing in on this browser with that email.</p>
+            <p class="hint">We'll email them an invitation. It expires after ${INVITE_DAYS} days. They accept by creating a free account (or logging in) with that email.</p>
             <p class="error-text" data-error hidden></p>
             <button class="btn" type="submit">Send invite</button>
           </form>
@@ -559,6 +629,23 @@
         </section>
 
         ${owner ? `
+        <section class="card wide" id="share-doctor">
+          <h2 style="font-size:1.35rem">Share with a doctor</h2>
+          <p>Create a link you can send to a doctor or their office. When they open it and log in, they join this profile as a <strong>physician</strong>: they can see everything, and add or edit diagnoses, medications, doctor's notes and uploads. It's free for them.</p>
+          <p class="hint">Anyone with the link can join, so only send it to the doctor. Links expire after 14 days, and you can revoke one or remove the doctor at any time.</p>
+          ${ui.newLink && ui.newLink.profileId === p.id ? `
+            <div class="field" style="margin-top:0.75rem"><label for="share-url">Doctor link</label>
+              <div style="display:flex;gap:0.5rem;flex-wrap:wrap"><input id="share-url" readonly value="${h(ui.newLink.url)}" style="flex:1;min-width:200px">
+              <button class="btn small" data-action="copy-link">Copy link</button></div>
+              <p class="hint">Copy it now: for security we won't show this link again.</p></div>` : ""}
+          <button class="btn secondary" data-action="share-link">Create a doctor link</button>
+          ${(p.shareLinks || []).length ? `
+            <h3 style="font-size:1rem;margin-top:1.25rem">Active links</h3>
+            <ul class="list">${p.shareLinks.map((l) => `<li><div class="main">
+              <div class="title">Physician link</div>
+              <div class="meta">Created ${h(fmtStamp(l.createdAt))} by ${h(l.createdByName)} · expires ${h(new Date(l.expiresAt).toLocaleDateString())}</div></div>
+              <div class="actions"><button class="btn small danger" data-action="revoke-link" data-id="${h(l.id)}">Revoke</button></div></li>`).join("")}</ul>` : ""}
+        </section>
         <section class="card wide">
           <h2 style="font-size:1.35rem">History of changes</h2>
           <ul class="list">${p.history.slice(0, 50).map((x) => `<li><div class="main"><div>${h(x.text)}</div><div class="meta">${byline(x)}</div></div></li>`).join("") || '<li class="empty">No changes yet.</li>'}</ul>
@@ -571,58 +658,6 @@
           <button class="btn danger" data-action="delete-profile">Delete profile</button></div>
         </section>` : ""}
       </div>`;
-  }
-
-  // ---------- sample data ----------
-  function sampleProfile(u) {
-    const d = (offset) => { const x = new Date(); x.setDate(x.getDate() + offset); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
-    const at = (offset) => new Date(Date.now() + offset * 86400000).toISOString();
-    const fam = { byName: u.name, byEmail: u.email, byRole: "family" };
-    const aide = { byName: "Maria Lopez", byEmail: "maria@example.com", byRole: "assisting" };
-    const doc = { byName: "Dr. Ada Okafor", byEmail: "dr.okafor@example.com", byRole: "physician" };
-    const dx1 = uid(), dx2 = uid();
-    return {
-      id: uid(), name: "Eleanor Hughes (sample)", dob: "1941-03-12",
-      summary: "Lives at home with her daughter. Hard of hearing on the left side, so speak on her right. Likes a short walk after lunch.",
-      emergency: { name: u.name, phone: "5551234567" },
-      team: [
-        { id: uid(), name: u.name, email: u.email, role: "family", status: "owner" },
-        { id: uid(), name: "Maria Lopez", email: "maria@example.com", role: "assisting", status: "joined" },
-        { id: uid(), name: "Dr. Ada Okafor", email: "dr.okafor@example.com", role: "physician", status: "joined" },
-        { id: uid(), name: "Sam Hughes", email: null, phone: "5559876543", role: "family", status: "contact" },
-      ],
-      shifts: [
-        { id: uid(), day: "Monday", start: "09:00", end: "13:00", caregiver: "Maria Lopez" },
-        { id: uid(), day: "Wednesday", start: "09:00", end: "13:00", caregiver: "Maria Lopez" },
-        { id: uid(), day: "Friday", start: "09:00", end: "13:00", caregiver: "Maria Lopez" },
-        { id: uid(), day: "Saturday", start: "10:00", end: "16:00", caregiver: "Sam Hughes" },
-        { id: uid(), day: "Sunday", start: "10:00", end: "16:00", caregiver: u.name },
-      ],
-      followups: [
-        { id: uid(), kind: "pickup", what: "Pick up lisinopril refill", who: "Sam Hughes", date: d(-2), done: false, ...fam, at: at(-6) },
-        { id: uid(), kind: "appointment", what: "Blood pressure recheck with Dr. Okafor", who: u.name, date: d(12), done: false, ...doc, at: at(-3) },
-        { id: uid(), kind: "appointment", what: "Physical therapy evaluation", who: u.name, date: d(-9), done: true, ...fam, at: at(-20) },
-      ],
-      diagnoses: [
-        { id: dx1, name: "High blood pressure", date: "2019-06-04", clinician: "Dr. Ada Okafor", notes: "Managed with medication.", status: "active", ...doc, at: at(-30) },
-        { id: dx2, name: "Urinary tract infection", date: d(-40), clinician: "Urgent care", notes: "Finished antibiotics.", status: "resolved", ...fam, at: at(-40) },
-      ],
-      meds: [
-        { id: uid(), name: "Lisinopril", dose: "20 mg", timing: "Every morning", prescriber: "Dr. Ada Okafor", ...doc, at: at(-3) },
-        { id: uid(), name: "Vitamin D", dose: "1000 IU", timing: "With breakfast", prescriber: "", ...fam, at: at(-30) },
-      ],
-      medical: { allergies: "Penicillin (rash)", mobility: "Walks with a walker. Needs a hand on stairs.", needs: "Help with showering. Reminders for afternoon fluids.", primary: "Dr. Ada Okafor" },
-      notes: [
-        { id: uid(), date: d(-3), doctor: "Dr. Ada Okafor", dx: dx1, text: "Blood pressure still high at 152/90. Increasing lisinopril from 10 mg to 20 mg each morning. Recheck in 2 weeks. Please log any dizziness.", ...doc, at: at(-3) },
-      ],
-      docs: [],
-      logs: [
-        { id: uid(), note: "Took morning meds with breakfast. Walked to the mailbox and back with the walker. In good spirits.", date: d(-1), time: "10:15", ...aide, at: at(-1) },
-        { id: uid(), note: "A little dizzy standing up after lunch. Sat for five minutes and it passed. Noting for Dr. Okafor.", date: d(-1), time: "13:20", ...aide, at: at(-1) },
-        { id: uid(), note: "Quiet evening. Ate most of dinner.", date: d(-2), time: "19:00", ...fam, at: at(-2) },
-      ],
-      history: [{ id: uid(), text: "Created the sample profile", ...fam, at: new Date().toISOString() }],
-    };
   }
 
   // ---------- form handling ----------
@@ -645,21 +680,6 @@
   }
   const val = (form, n) => String(form.elements[n]?.value ?? "").trim();
 
-  function signIn(name, email) {
-    email = email.toLowerCase();
-    db.users[email] = { name, email };
-    db.session = email;
-    const now = Date.now();
-    // Accept any open invitations for this email.
-    db.profiles.forEach((p) => p.team.forEach((m) => {
-      if (m.email === email && m.status === "invited" && new Date(m.expiresAt).getTime() >= now) {
-        m.status = "joined";
-        p.history.unshift({ id: uid(), text: `${name} accepted the invitation`, byName: name, byEmail: email, byRole: m.role, at: new Date().toISOString() });
-      }
-    }));
-    persist();
-  }
-
   async function authSubmit(f, path, payload, welcome) {
     if (!navigator.onLine) return formError(f, "You're offline. Connect to the internet and try again.");
     const btn = f.querySelector("button[type=submit]");
@@ -668,9 +688,13 @@
     btn.textContent = "Please wait…";
     try {
       account = await api(path, { method: "POST", body: payload });
-      useAccount();
       ui.profileId = null;
-      toast(welcome);
+      ui.authMode = null;
+      profilesLoaded = false;
+      render();
+      await afterSignIn();
+      if (account.emailSent === false) toast("Account created, but we couldn't send the confirmation email yet. You can resend it from the banner.", true);
+      else if (!document.querySelector(".toast.err")) toast(welcome);
       render();
     } catch (err) {
       formError(f, err.message);
@@ -679,31 +703,63 @@
     }
   }
 
+  async function createProfile(f, path, payload, message) {
+    if (!navigator.onLine) return toast("Not saved: you're offline.", true);
+    const btn = f?.querySelector("button[type=submit]");
+    if (btn) btn.disabled = true;
+    try {
+      const { profile } = await api(path, { method: "POST", body: payload });
+      db.profiles.push(profile);
+      ui.profileId = profile.id;
+      ui.tab = "schedule";
+      toast(message);
+      render();
+      window.scrollTo(0, 0);
+    } catch (err) {
+      if (f) formError(f, err.message); else toast("Not saved: " + err.message, true);
+      if (btn) btn.disabled = false;
+    }
+  }
+
   const forms = {
     async signup(f) {
       if (!requireFields(f, ["name", "email", "password"])) return;
       if (!validEmail(val(f, "email"))) return formError(f, "Please enter a valid email address.");
       if (f.elements.password.value.length < MIN_PASSWORD) return formError(f, `Please choose a password of at least ${MIN_PASSWORD} characters.`);
-      await authSubmit(f, "/api/auth/signup", { name: val(f, "name"), email: val(f, "email"), password: f.elements.password.value }, "Account created. Your 7-day free trial has started.");
+      await authSubmit(f, "/api/auth?action=signup", { name: val(f, "name"), email: val(f, "email"), password: f.elements.password.value }, pendingJoin() ? "Account created. Check your email to confirm it." : "Account created. Your 7-day free trial has started.");
     },
     async login(f) {
       if (!requireFields(f, ["email", "password"])) return;
-      await authSubmit(f, "/api/auth/login", { email: val(f, "email"), password: f.elements.password.value }, "Welcome back.");
+      await authSubmit(f, "/api/auth?action=login", { email: val(f, "email"), password: f.elements.password.value }, "Welcome back.");
     },
-    "profile-create"(f) {
+    async forgot(f) {
+      if (!requireFields(f, ["email"])) return;
+      if (!validEmail(val(f, "email"))) return formError(f, "Please enter a valid email address.");
+      const btn = f.querySelector("button[type=submit]");
+      btn.disabled = true;
+      try {
+        const { message } = await api("/api/auth?action=forgot", { method: "POST", body: { email: val(f, "email") } });
+        const ok = f.querySelector("[data-ok]");
+        ok.textContent = message;
+        ok.hidden = false;
+      } catch (err) {
+        formError(f, err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    },
+    async reset(f) {
+      const password = f.elements.password.value;
+      if (password.length < MIN_PASSWORD) return formError(f, `Please choose a password of at least ${MIN_PASSWORD} characters.`);
+      await authSubmit(f, "/api/auth?action=reset", { email: ui.reset?.email, token: ui.reset?.token, password }, "Password changed. You're logged in.");
+    },
+    async "profile-create"(f) {
       if (!requireFields(f, ["name", "authority"])) return;
-      const u = me();
-      const p = {
+      const draft = {
         id: uid(), name: val(f, "name"), dob: val(f, "dob"), summary: val(f, "summary"),
-        emergency: { name: val(f, "ecName"), phone: val(f, "ecPhone") },
-        team: [{ id: uid(), name: u.name, email: u.email, role: "family", status: "owner" }],
-        shifts: [], followups: [], diagnoses: [], meds: [], medical: { allergies: "", mobility: "", needs: "", primary: "" },
-        notes: [], docs: [], logs: [], history: [],
+        emergency: { name: val(f, "ecName"), phone: val(f, "ecPhone") }, authority: true,
       };
-      if (commit(null, null, null, () => {
-        p.history.push({ id: uid(), text: "Created the profile", byName: u.name, byEmail: u.email, byRole: "family", at: new Date().toISOString() });
-        db.profiles.push(p);
-      })) { ui.profileId = p.id; ui.tab = "schedule"; render(); }
+      await createProfile(f, "/api/profiles?action=create", { profile: draft }, "Profile created");
     },
     "profile-edit"(f, p) {
       if (!requireFields(f, ["name"])) return;
@@ -749,10 +805,28 @@
       if (file.size > MAX_UPLOAD) return formError(f, "Files must be 20 MB or smaller.");
       if (!(file.type === "application/pdf" || file.type.startsWith("image/"))) return formError(f, "Only PDFs and images can be uploaded.");
       if (!navigator.onLine) return toast("Not saved: you're offline.", true);
+      if (!can(p, "notes")) return toast("Not saved: your role can't upload files.", true);
       const x = { id: uid(), name: file.name, size: file.size, type: file.type, label: val(f, "label"), ...stamp() };
-      try { await idb.put(x.id, file); } catch (err) { return formError(f, "This browser couldn't store the file."); }
+      const btn = f.querySelector("button[type=submit]");
+      btn.disabled = true;
+      btn.textContent = "Uploading… 0%";
+      try {
+        const safeName = file.name.replace(/[^\w.\- ]/g, "_").slice(-100) || "file";
+        const blob = await window.BlobClient.upload(`files/${p.id}/${x.id}-${safeName}`, file, {
+          access: "private",
+          handleUploadUrl: "/api/files",
+          clientPayload: JSON.stringify({ profileId: p.id }),
+          contentType: file.type,
+          multipart: file.size > 8 * 1024 * 1024,
+          onUploadProgress: ({ percentage }) => { btn.textContent = `Uploading… ${Math.round(percentage)}%`; },
+        });
+        x.pathname = blob.pathname;
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Upload";
+        return formError(f, "The upload didn't finish. " + (err.message || ""));
+      }
       if (commit(p, "notes", `Uploaded ${DOC_LABEL[x.label].toLowerCase()} “${x.name}”`, () => p.docs.push(x))) render();
-      else idb.del(x.id).catch(() => {});
     },
     log(f, p) {
       if (!requireFields(f, ["note", "date", "time"])) return;
@@ -782,9 +856,20 @@
   const actions = {
     "auth-mode"(el) { ui.authMode = el.dataset.mode; render(); document.getElementById("au-email")?.focus(); },
     async signout() {
-      try { await api("/api/auth/logout", { method: "POST" }); } catch { /* the cookie is cleared server-side; ignore */ }
-      account = null; db.session = null; persist(); ui.profileId = null; ui.authMode = "login";
+      try { await api("/api/auth?action=logout", { method: "POST" }); } catch { /* the cookie is cleared server-side; ignore */ }
+      account = null; db.profiles = []; profilesLoaded = false; ui.profileId = null; ui.authMode = "login"; ui.newLink = null;
       render();
+    },
+    async "resend-verification"(el) {
+      el.disabled = true;
+      try {
+        const r = await api("/api/auth?action=resend-verification", { method: "POST" });
+        toast(r.alreadyVerified ? "Your email is already confirmed." : `Sent. Check your inbox at ${account.user.email}.`);
+        if (r.alreadyVerified) loadAccount(false);
+      } catch (err) {
+        toast(err.message, true);
+      }
+      el.disabled = false;
     },
     async checkout(el) {
       if (el) el.disabled = true;
@@ -797,9 +882,9 @@
       }
     },
     recheck() { loading = true; render(); loadAccount(true); },
-    "load-sample"() {
-      const p = sampleProfile(me());
-      if (commit(null, null, null, () => db.profiles.push(p))) { ui.profileId = p.id; ui.tab = "schedule"; render(); toast("Sample loaded. Try signing in as maria@example.com to see the aide's view."); }
+    "load-sample"(el) {
+      if (el) el.disabled = true;
+      createProfile(null, "/api/profiles?action=sample", {}, "Sample profile loaded");
     },
     "open-profile"(el) { ui.profileId = el.dataset.id; ui.tab = "schedule"; render(); window.scrollTo(0, 0); },
     back() { ui.profileId = null; render(); },
@@ -834,25 +919,42 @@
       const n = p.notes.find((x) => x.id === el.dataset.id);
       if (n && confirm("Delete this note?") && commit(p, "notes", `Deleted a note from ${n.doctor}`, () => p.notes.splice(p.notes.indexOf(n), 1))) render();
     },
-    async "open-doc"(el, p) {
-      const d = p.docs.find((x) => x.id === el.dataset.id);
-      const w = window.open("", "_blank");
-      try {
-        const blob = await idb.get(d.id);
-        if (!blob) throw new Error();
-        const url = URL.createObjectURL(blob);
-        if (w) w.location = url; else location.href = url;
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-      } catch {
-        if (w) w.close();
-        toast("This file isn't stored in this browser.", true);
-      }
+    "open-doc"(el, p) {
+      window.open(`/api/files?profile=${encodeURIComponent(p.id)}&doc=${encodeURIComponent(el.dataset.id)}`, "_blank", "noopener");
     },
     "del-doc"(el, p) {
       const d = p.docs.find((x) => x.id === el.dataset.id);
-      if (d && confirm(`Delete “${d.name}”?`) && commit(p, "notes", `Deleted upload “${d.name}”`, () => p.docs.splice(p.docs.indexOf(d), 1))) {
-        idb.del(d.id).catch(() => {});
+      if (d && confirm(`Delete “${d.name}”?`) && commit(p, "notes", `Deleted upload “${d.name}”`, () => p.docs.splice(p.docs.indexOf(d), 1))) render();
+    },
+    async "share-link"(el, p) {
+      if (!can(p, "manageTeam")) return toast("Only the owner can share this profile.", true);
+      el.disabled = true;
+      try {
+        const { url, profile } = await api(`/api/profiles?id=${encodeURIComponent(p.id)}&action=share-link`, { method: "POST" });
+        replaceProfile(p, profile);
+        ui.newLink = { profileId: p.id, url };
         render();
+        document.getElementById("share-url")?.select();
+      } catch (err) {
+        toast(err.message, true);
+        el.disabled = false;
+      }
+    },
+    async "copy-link"() {
+      const input = document.getElementById("share-url");
+      try { await navigator.clipboard.writeText(input.value); toast("Link copied"); }
+      catch { input.select(); toast("Press Ctrl+C (or ⌘C) to copy the selected link."); }
+    },
+    async "revoke-link"(el, p) {
+      if (!confirm("Revoke this doctor link? Anyone who hasn't used it yet won't be able to join. Doctors who already joined stay on the team.")) return;
+      try {
+        const { profile } = await api(`/api/profiles?id=${encodeURIComponent(p.id)}&action=revoke-link`, { method: "POST", body: { linkId: el.dataset.id } });
+        replaceProfile(p, profile);
+        ui.newLink = null;
+        toast("Link revoked");
+        render();
+      } catch (err) {
+        toast(err.message, true);
       }
     },
     "remove-member"(el, p) {
@@ -868,15 +970,18 @@
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     },
-    "delete-profile"(el, p) {
+    async "delete-profile"(el, p) {
       const typed = prompt(`This permanently deletes ${p.name}'s profile and every uploaded file. Type DELETE to confirm.`);
       if (typed !== "DELETE") return;
       if (!can(p, "deleteProfile")) return toast("Not deleted: only the owner can delete a profile.", true);
-      const docIds = p.docs.map((d) => d.id);
-      if (commit(null, null, null, () => db.profiles.splice(db.profiles.indexOf(p), 1))) {
-        docIds.forEach((id) => idb.del(id).catch(() => {}));
+      try {
+        await api(`/api/profiles?id=${encodeURIComponent(p.id)}`, { method: "DELETE" });
+        db.profiles = db.profiles.filter((x) => x !== p);
         ui.profileId = null;
+        toast("Profile deleted");
         render();
+      } catch (err) {
+        toast("Not deleted: " + err.message, true);
       }
     },
   };
@@ -910,12 +1015,18 @@
   });
   window.addEventListener("online", render);
   window.addEventListener("offline", render);
-  // Another tab changed the data: reload it so this tab never overwrites newer entries.
-  window.addEventListener("storage", (e) => { if (e.key === STORE_KEY) { db = load(); render(); } });
+  // Coming back to the tab: pick up changes other people made in the meantime.
+  document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState !== "visible" || !account?.access || savingIds.size || document.activeElement?.closest("form")) return;
+    await loadProfiles();
+    render();
+  });
 
   render();
   loadAccount(justSubscribed).then(() => {
     if (justSubscribed && account?.subscribed) { history.replaceState(null, "", location.pathname); toast("Subscription confirmed. Thank you!"); }
+    if (verifiedParam === "1") toast("Email confirmed. Thank you!");
+    if (verifiedParam === "0") toast("That confirmation link has expired. Use “Send it again” in the banner.", true);
   });
   // Re-check access every 10 minutes so an ended trial or cancelled subscription locks the app.
   setInterval(() => { if (account && !document.querySelector("form[data-form] input:focus")) loadAccount(false); }, 600000);

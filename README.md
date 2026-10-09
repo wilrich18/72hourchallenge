@@ -7,38 +7,40 @@ A marketing site and web app for **Care Loop**, built from the Care Loop PRD. Ca
 
 ## The app
 
-Accounts and access are handled on the server (see below), but profile data is still saved in the browser. **It is not ready for real patient information.**
+Everything is stored on the server: accounts, care profiles and uploaded files. **It is not ready for real patient information yet** (see the privacy requirements in the PRD).
 
-- **Invitations:** an account whose email was invited to a profile accepts the invitation on sign-in, on the same browser. Invitations expire after 7 days.
-- **Roles and permissions** follow the PRD's proposed permissions table: family caregiver (owner), assisting caregiver and physician. These are enforced only in the browser. The real release must enforce them on the server (P2).
-- **Each entry** stores its author and time from the signed-in person. The owner can see a history of changes, export the profile as JSON, and delete it along with its uploaded files.
-- **Log entries** with a future date or time are refused, and overdue follow-ups are flagged.
-- **Uploads** accept PDFs and images up to 20 MB. They are stored in IndexedDB in that browser only.
-- **Saving** always shows whether it worked. When the browser is offline, nothing is saved.
-
-To look around, use "Load a sample profile" on the profiles page.
+- **Roles and permissions** follow the PRD's permissions table (family caregiver/owner, assisting caregiver, physician). The browser checks them for friendly messages, and the server enforces them on every save (`api/_profiles.js`): each part of a profile can only be changed by a role allowed to change it, new entries must be signed by the person saving them, logs can't be edited once saved, and the change history is append-only.
+- **Invitations:** the owner invites people by email. They get an email and accept by creating an account (or logging in) with that address. Accepting requires a confirmed email, so nobody can claim someone else's invitation. Invitations expire after 7 days.
+- **Doctor links:** the owner can create a link (Care team tab, then Share with a doctor). A doctor who opens it and logs in with a confirmed email joins the profile as its physician. Links expire after 14 days, can be revoked, and only a hash of each link is stored.
+- **Uploads:** PDFs and images up to 20 MB go straight from the browser to private Blob storage (`api/files.js` checks the uploader's role first). Downloads are only served to people on that profile. Deleting an upload or a profile deletes the stored files.
+- **Saving** shows "Saving…", then "Saved" or a plain "Not saved" message. If someone else changed the profile in the meantime, the change is refused and the latest version is loaded. Offline, nothing is saved.
 
 ## Accounts, free trial and subscription
 
-- People create a Care Loop account (name, email, password of at least 10 characters) to use `/app`. No credit card is needed.
-- The 7-day free trial starts when the account is created. After it ends, the server stops granting access until the account has an active $20/month Whop subscription (plan `plan_dIPsSbDYnGhzG`).
-- "Continue to payment" calls `api/checkout.js`, which creates a Whop checkout tagged with the account's email, so the payment is matched to the account even if a different email is used at Whop. After paying, Whop sends people back to `/app?subscribed=1`.
-- Subscription status is checked with Whop once the trial is over, cached for 6 hours, and re-checked on demand ("Check my subscription again").
+- People create a Care Loop account (name, email, password of at least 10 characters). No credit card is needed. A confirmation email is sent, and a banner reminds them until they confirm.
+- **Forgot password** emails a reset link that works for 1 hour. Setting a new password logs out every other device.
+- **Login limit:** 5 wrong passwords within 15 minutes locks the account for 15 minutes.
+- The 7-day free trial starts at sign-up. After it ends, the family caregiver needs an active $20/month Whop subscription (plan `plan_dIPsSbDYnGhzG`) to keep using Care Loop and to create profiles. People invited onto someone's care team (aides, nurses, doctors) use it free.
+- "Continue to payment" calls `api/checkout.js`, which creates a Whop checkout tagged with the account's email, so the payment is matched to the account even if a different email is used at Whop. After paying, Whop sends people back to `/app?subscribed=1`. Subscription status is cached for 6 hours and can be re-checked on demand.
 
-API routes: `api/auth/signup.js`, `api/auth/login.js`, `api/auth/logout.js`, `api/auth/me.js`, `api/checkout.js`. Shared code is in `api/_lib.js`.
+Server functions (5, within the Vercel Hobby limit of 12): `api/auth.js` (`?action=signup|login|logout|me|verify|resend-verification|forgot|reset`), `api/profiles.js`, `api/files.js`, `api/checkout.js`, `api/early-access.js`. Shared code is in `api/_lib.js`, `api/_profiles.js` and `api/_sample.js`.
 
-Accounts are stored as private JSON files in the `careloop-accounts` Vercel Blob store, one per account, with passwords hashed using scrypt. Sessions are signed, HttpOnly cookies that last 14 days.
+Storage: the private `careloop-accounts` Vercel Blob store holds `users/` (one JSON per account, passwords hashed with scrypt), `profiles/`, `access/` (which profiles each email can open) and `files/`. Sessions are signed, HttpOnly cookies that last 14 days.
 
-Environment variables (Vercel → Settings → Environment Variables):
+`public/vendor/blob-upload.js` is the `upload()` function from `@vercel/blob/client`, bundled for the browser with esbuild (`--bundle --minify --format=iife --global-name=BlobClient --platform=browser`) from an entry file containing `export { upload } from "@vercel/blob/client";`.
+
+Environment variables (Vercel, then Settings, then Environment Variables):
 
 | Name | Required | What it's for |
 |---|---|---|
 | `BLOB_READ_WRITE_TOKEN` | yes | Set automatically by the Blob store |
 | `SESSION_SECRET` | yes | Signs login cookies |
+| `RESEND_API_KEY` | yes, for email | Sends confirmation, password reset and invitation emails through [Resend](https://resend.com). Without it no emails go out, so nobody can confirm their email, reset a password, or accept an invitation or doctor link. |
+| `EMAIL_FROM` | recommended | Sender, e.g. `Care Loop <hello@yourdomain.com>` on a domain verified in Resend. Defaults to Resend's test sender, which only delivers to your own Resend account email. |
 | `WHOP_API_KEY` | yes, for payments | Whop company API key that can read members (including email) and memberships and create checkout configurations. Without it, nobody can get back in after their trial. |
 | `WHOP_COMPANY_ID`, `WHOP_PLAN_ID` | no | Override the default business and plan |
 
-Not built yet: password reset by email, email verification, two-step sign-in, and login rate limiting. Profile data is still saved in each browser, so it doesn't follow an account to another device.
+Not built yet: two-step sign-in, an audit log of who viewed what (P3), and a data-exposure plan (P9).
 
 ## Early-access sign-ups
 
