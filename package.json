@@ -1,0 +1,9 @@
+{
+  "name": "care-loop",
+  "private": true,
+  "description": "Care Loop marketing site and demo app",
+  "scripts": {
+    "dev": "npx vercel dev"
+  },
+  "engines": { "node": ">=18" }
+}

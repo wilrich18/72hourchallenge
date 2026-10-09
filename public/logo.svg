@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Care Loop">
+  <circle cx="32" cy="32" r="30" fill="#1d6b5f"/>
+  <path d="M20 32a12 12 0 0 1 20.5-8.5" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M44 32a12 12 0 0 1-20.5 8.5" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M38 18l4 6-7 1z" fill="#fff"/>
+  <path d="M26 46l-4-6 7-1z" fill="#fff"/>
+</svg>
